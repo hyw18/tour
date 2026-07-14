@@ -127,7 +127,7 @@ def test_fast_simulation_runs_all_bot_game_to_temporary_end():
     engine = GameEngine(DATA_DIR)
     configure(engine, slot_types=["bot", "bot"], fast_simulation=True, total_rounds=10, bot_action_delay=2)
     state = engine.start_game()
-    assert state["phase"] == "ended"
+    assert state["phase"] == "finished"
     assert state["ended"] is True
 
 
@@ -1280,7 +1280,7 @@ def test_final_round_reaches_temporary_end():
     engine.take_turn_for_player(human["id"], source="dev")
     bot_id = engine.current_player().id
     state = engine.take_turn_for_player(bot_id, source="bot")
-    assert state["phase"] == "ended"
+    assert state["phase"] == "finished"
     assert state["ended"] is True
 
 

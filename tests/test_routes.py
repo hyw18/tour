@@ -35,10 +35,10 @@ def test_host_and_player_pages_are_separate(client):
 
 def test_host_only_start_pause_resume_and_config(client):
     response = post(client, "/api/config", {"total_slots": 2})
-    assert response.status_code == 400
+    assert response.status_code == 403
     assert "host permission" in response.get_json()["error"]
     client.get("/host")
-    assert post(client, "/api/config", {"total_slots": 2}, "still-blocked").status_code == 400
+    assert post(client, "/api/config", {"total_slots": 2}, "still-blocked").status_code == 403
     authenticate(client)
     response = post(client, "/api/config", {
         "total_slots": 2,
@@ -238,7 +238,7 @@ def test_public_private_host_security_and_exports(monkeypatch):
     assert all("cash_won" not in player for player in public_state["players"])
     assert "public_wealth" in public_state
     blocked = client.get(f"/api/player/{player['id']}/private", headers={"X-Player-Id": "other"})
-    assert blocked.status_code == 400
+    assert blocked.status_code == 403
     private = client.get(f"/api/player/{player['id']}/private", headers={"X-Player-Id": player["id"]})
     assert private.status_code == 200
     assert "loan" in private.get_json()
@@ -263,8 +263,8 @@ def test_ended_game_blocks_mutating_routes(monkeypatch):
     state = client.get("/api/state").get_json()
     assert state["ended"] is True
     response = post(client, "/api/roll", {"player_id": player["id"]}, "roll-after-end")
-    assert response.status_code == 400
-    assert "ended" in response.get_json()["error"]
+    assert response.status_code == 409
+    assert "current phase" in response.get_json()["error"]
 
 
 def test_host_can_end_hosting_during_play_and_after_game_end(monkeypatch):
@@ -278,7 +278,7 @@ def test_host_can_end_hosting_during_play_and_after_game_end(monkeypatch):
     active_end = post(client, "/api/host/end", key="end-active")
     assert active_end.status_code == 200
     state = active_end.get_json()
-    assert state["phase"] == "lobby"
+    assert state["phase"] == "setup"
     assert state["players"] == []
     assert state["ended"] is False
     assert state["public_wealth"]["players"] == []
@@ -291,4 +291,4 @@ def test_host_can_end_hosting_during_play_and_after_game_end(monkeypatch):
     assert client.get("/api/state").get_json()["ended"] is True
     ended_end = post(client, "/api/host/end", key="end-ended")
     assert ended_end.status_code == 200
-    assert ended_end.get_json()["phase"] == "lobby"
+    assert ended_end.get_json()["phase"] == "setup"

@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from game.engine import GameEngine, GameRuleError  # noqa: E402
+from game.engine import GameEngine  # noqa: E402
 
 
 FAIL_DIR = ROOT / "validation_failures"

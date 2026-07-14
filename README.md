@@ -44,7 +44,7 @@ HOST_TOKEN='충분히-길고-안전한-토큰' python app.py
 
 ```bash
 APP_MODE=development DEBUG_GAME_TOOLS=true \
-  flask --app app run --host 127.0.0.1 --debug
+  flask --app app run --host 127.0.0.1 --debug --no-reload
 ```
 
 호스트 컴퓨터에서는 `http://127.0.0.1:5000/host`로 접속합니다.
@@ -63,6 +63,24 @@ pytest -q
 ```
 
 전체 품질 검증 도구는 `pip install -r requirements-dev.txt`로 설치합니다.
+
+## 운영 실행
+
+운영 모드에서는 `SECRET_KEY`가 반드시 필요하며, Flask 개발 서버 대신 WSGI
+서버를 사용해야 합니다. HTTPS 환경에서는 `SESSION_COOKIE_SECURE=true`에
+해당하는 애플리케이션 설정도 활성화하세요. LAN HTTP 개발 환경에서는 secure
+쿠키를 강제하지 않으므로 로그인 쿠키가 정상 동작합니다.
+
+```bash
+APP_MODE=production \
+SECRET_KEY='충분히-길고-고정된-비밀키' \
+HOST_TOKEN='충분히-길고-안전한-호스트-토큰' \
+SESSION_COOKIE_SECURE=true \
+gunicorn 'app:create_app()'
+```
+
+개발 모드의 자동 진행 루프가 reloader에 의해 중복 생성되지 않도록 문서의 개발
+명령은 `--no-reload`를 사용합니다.
 
 ## 구조
 

@@ -11,10 +11,12 @@ const simProgress = document.querySelector("#simProgress");
 
 let simulationRunning = false;
 let simulationJobId = null;
-let roomOpened = false;
 let configLoaded = false;
 let configDirty = false;
 let hostPollTimer = null;
+let requestInFlight = false;
+let currentState = null;
+let savedConfig = null;
 
 function setHostAuthenticated(authenticated) {
   document.querySelector(".host-dashboard").dataset.authenticated = String(authenticated);
@@ -84,8 +86,12 @@ async function getHostState() {
   return response.json();
 }
 
-function renderSlots(slotTypes = [], strategies = []) {
+function renderSlots(slotTypes, strategies) {
   const count = Number(document.querySelector("#totalSlots").value);
+  const currentTypes = [...document.querySelectorAll("[data-slot-type]")].map((element) => element.value);
+  const currentStrategies = [...document.querySelectorAll("[data-bot-strategy]")].map((element) => element.value);
+  const types = slotTypes || currentTypes;
+  const botStrategies = strategies || currentStrategies;
   slotsEl.innerHTML = "";
   for (let index = 0; index < count; index += 1) {
     const row = document.createElement("div");
@@ -104,14 +110,15 @@ function renderSlots(slotTypes = [], strategies = []) {
       </select>
     `;
     slotsEl.append(row);
-    row.querySelector("[data-slot-type]").value = slotTypes[index] || "human";
-    row.querySelector("[data-bot-strategy]").value = strategies[index] || "balanced";
+    row.querySelector("[data-slot-type]").value = types[index] || "human";
+    row.querySelector("[data-bot-strategy]").value = botStrategies[index] || "balanced";
   }
   syncSlotStrategyVisibility();
 }
 
 function renderConfig(config) {
   if (!config || (configDirty && configLoaded)) return;
+  savedConfig = JSON.parse(JSON.stringify(config));
   document.querySelector("#totalSlots").value = String(config.total_slots);
   document.querySelector("#totalRounds").value = String(config.total_rounds);
   document.querySelector("#turnLimit").value = config.turn_limit_seconds == null ? "unlimited" : String(config.turn_limit_seconds);
@@ -123,10 +130,37 @@ function renderConfig(config) {
   document.querySelector("#configDirty").hidden = true;
 }
 
-function applyPhaseLocks(state) {
-  const locked = ["active", "paused", "ended"].includes(state.phase);
-  document.querySelectorAll("#totalSlots,#totalRounds,#turnLimit,#botDelay,#fastSimulation,[data-slot-type],[data-bot-strategy],#saveConfig")
-    .forEach((element) => { element.disabled = locked; });
+function updateControlsForPhase(state) {
+  const phase = state.phase;
+  const editable = ["setup", "lobby"].includes(phase) && !requestInFlight;
+  document.querySelectorAll("#totalSlots,#totalRounds,#turnLimit,#botDelay,#fastSimulation,[data-slot-type]")
+    .forEach((element) => { element.disabled = !editable; });
+  document.querySelectorAll("[data-bot-strategy]").forEach((element) => {
+    const type = element.closest(".slot-row")?.querySelector("[data-slot-type]")?.value;
+    element.disabled = !editable || type !== "bot";
+  });
+  document.querySelector("#saveConfig").disabled = !editable || !configDirty;
+  document.querySelector("#startGame").disabled = requestInFlight || !["setup", "lobby"].includes(phase) || configDirty;
+  document.querySelector("#pauseGame").disabled = requestInFlight || phase !== "active";
+  document.querySelector("#resumeGame").disabled = requestInFlight || phase !== "paused";
+  document.querySelector("#finishGame").disabled = requestInFlight || !["active", "paused"].includes(phase);
+  document.querySelector("#newGame").disabled = requestInFlight || phase !== "finished";
+  document.querySelector("#resetAll").disabled = requestInFlight;
+
+  const labels = { setup: "설정 중", lobby: "참가 대기", active: "진행 중", paused: "일시중지", finished: "종료됨", resetting: "초기화 중" };
+  const nextActions = {
+    setup: configDirty ? "설정 적용" : "게임 시작",
+    lobby: configDirty ? "설정 적용" : "플레이어 확인 후 시작",
+    active: "일시중지 또는 현재 게임 종료",
+    paused: "재개 또는 현재 게임 종료",
+    finished: "새 게임 준비",
+    resetting: "초기화 완료 대기",
+  };
+  document.querySelector("#gameStatusText").textContent = labels[phase] || phase;
+  document.querySelector("#configStatusText").textContent = configDirty ? "저장되지 않음" : (editable ? "저장됨" : "잠김");
+  document.querySelector("#nextActionText").textContent = nextActions[phase] || "상태 확인";
+  document.querySelector("#configDirty").hidden = !configDirty;
+  document.querySelector("#saveConfig").classList.toggle("attention", configDirty);
 }
 
 function syncSlotStrategyVisibility() {
@@ -139,6 +173,7 @@ function syncSlotStrategyVisibility() {
     typeSelect.addEventListener("change", () => {
       strategySelect.hidden = typeSelect.value !== "bot";
       strategySelect.setAttribute("aria-hidden", String(typeSelect.value !== "bot"));
+      if (currentState) updateControlsForPhase(currentState);
     });
   });
 }
@@ -153,6 +188,23 @@ function configPayload() {
     bot_action_delay: Number(document.querySelector("#botDelay").value),
     fast_simulation: document.querySelector("#fastSimulation").checked
   };
+}
+
+function normalizedConfig(config) {
+  return {
+    total_slots: Number(config.total_slots),
+    total_rounds: Number(config.total_rounds),
+    slot_types: [...config.slot_types],
+    bot_strategies: [...config.bot_strategies],
+    turn_limit_seconds: ["unlimited", "none", ""].includes(String(config.turn_limit_seconds)) ? null : Number(config.turn_limit_seconds),
+    bot_action_delay: Number(config.bot_action_delay),
+    fast_simulation: Boolean(config.fast_simulation),
+  };
+}
+
+function updateDirtyFromForm() {
+  configDirty = !savedConfig || JSON.stringify(normalizedConfig(configPayload())) !== JSON.stringify(normalizedConfig(savedConfig));
+  if (currentState) updateControlsForPhase(currentState);
 }
 
 function renderHostBoard(state) {
@@ -183,12 +235,11 @@ function renderHostBoard(state) {
 }
 
 function renderPublicPanels(state) {
-  hostPhase.textContent = `${state.phase} · R${state.global_round}`;
+  hostPhase.textContent = `${document.querySelector("#gameStatusText").textContent} · R${state.global_round}`;
   if (serverStatus) {
-    const isOn = roomOpened || state.phase !== "lobby" || state.players.length > 0;
-    serverStatus.textContent = isOn ? "서버 ON" : "서버 OFF";
-    serverStatus.classList.toggle("on", isOn);
-    serverStatus.classList.toggle("off", !isOn);
+    serverStatus.textContent = state.server_status === "online" ? "서버 ON" : "서버 OFF";
+    serverStatus.classList.toggle("on", state.server_status === "online");
+    serverStatus.classList.toggle("off", state.server_status !== "online");
   }
   rankingsEl.innerHTML = (state.public_wealth?.players || [])
     .sort((a, b) => (a.rank || 999) - (b.rank || 999))
@@ -231,11 +282,13 @@ function renderBotMetrics(result) {
   `;
 }
 
-async function refresh() {
+async function refresh(forceConfig = false) {
   const state = await getHostState();
   if (state.error) throw new Error(state.error);
+  currentState = state;
+  if (forceConfig) configDirty = false;
   renderConfig(state.config);
-  applyPhaseLocks(state);
+  updateControlsForPhase(state);
   renderHostBoard(state);
   renderPublicPanels(state);
   renderLog(state);
@@ -243,52 +296,60 @@ async function refresh() {
 }
 
 document.querySelector("#totalSlots").addEventListener("change", () => renderSlots());
-document.querySelector(".control-panel").addEventListener("input", (event) => {
+document.querySelector("#hostConfigPanel").addEventListener("input", (event) => {
   if (!event.target.matches("button")) {
-    configDirty = true;
-    document.querySelector("#configDirty").hidden = false;
+    updateDirtyFromForm();
   }
 });
-document.querySelector("#saveConfig").addEventListener("click", async () => {
+
+async function runControl(buttonId, operation, successMessage) {
+  if (requestInFlight) return;
+  requestInFlight = true;
+  const button = document.querySelector(buttonId);
+  const originalText = button.textContent;
+  button.textContent = "처리 중…";
+  if (currentState) updateControlsForPhase(buttonId === "#resetAll" ? { ...currentState, phase: "resetting" } : currentState);
   try {
+    await operation();
+    await refresh(true);
+    showError("");
+    if (successMessage) stateView.textContent = successMessage;
+  } catch (error) {
+    await refresh(true).catch(() => {});
+    showError(error.status === 409 ? "현재 상태에서는 실행할 수 없습니다" : error.message);
+  } finally {
+    requestInFlight = false;
+    button.textContent = originalText;
+    if (currentState) updateControlsForPhase(currentState);
+  }
+}
+document.querySelector("#saveConfig").addEventListener("click", async () => {
+  await runControl("#saveConfig", async () => {
     const saved = await postJson("/api/config", configPayload());
     configDirty = false;
     renderConfig(saved.config);
-    roomOpened = true;
-    showError("");
-    await refresh();
-  } catch (error) { showError(error.message); }
+  }, "설정을 적용했습니다");
 });
 document.querySelector("#startGame").addEventListener("click", async () => {
-  roomOpened = true;
-  await postJson("/api/config", configPayload());
-  try {
-    await postJson("/api/start");
-  } catch (error) {
-    if (!error.message.includes("not all slots are filled")) {
-      throw error;
-    }
-    stateView.textContent = "서버 ON · 플레이어 입장을 기다리는 중";
-  }
-  await refresh();
+  if (configDirty) { showError("설정을 먼저 적용하세요"); return; }
+  await runControl("#startGame", () => postJson("/api/start"), "게임을 시작했습니다");
 });
 document.querySelector("#pauseGame").addEventListener("click", async () => {
-  await postJson("/api/pause");
-  await refresh();
+  await runControl("#pauseGame", () => postJson("/api/pause"), "게임을 일시중지했습니다");
 });
 document.querySelector("#resumeGame").addEventListener("click", async () => {
-  await postJson("/api/resume");
-  await refresh();
+  await runControl("#resumeGame", () => postJson("/api/resume"), "게임을 재개했습니다");
 });
 document.querySelector("#finishGame").addEventListener("click", async () => {
-  try { await postJson("/api/host/finish"); await refresh(); } catch (error) { showError(error.message); }
+  if (!window.confirm("현재 게임 결과를 확정하고 종료할까요?")) return;
+  await runControl("#finishGame", () => postJson("/api/host/finish"), "현재 게임을 종료했습니다");
 });
 document.querySelector("#newGame").addEventListener("click", async () => {
-  try { await postJson("/api/host/new-game", { keep_config: true }); configLoaded = false; await refresh(); } catch (error) { showError(error.message); }
+  await runControl("#newGame", () => postJson("/api/host/new-game", { keep_config: true }), "새 게임 설정을 변경할 수 있습니다");
 });
 document.querySelector("#resetAll").addEventListener("click", async () => {
   if (!window.confirm("게임 상태와 설정을 모두 초기화할까요?")) return;
-  try { await postJson("/api/host/reset"); configLoaded = false; await refresh(); } catch (error) { showError(error.message); }
+  await runControl("#resetAll", () => postJson("/api/host/reset"), "전체 초기화를 완료했습니다");
 });
 
 document.querySelector("#hostLogin").addEventListener("click", async () => {

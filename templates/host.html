@@ -8,7 +8,7 @@
   </head>
   <body class="host-screen">
     <main class="host-dashboard">
-      <section class="host-board-panel">
+      <section class="host-board-panel"{% if not host_authenticated %} hidden{% endif %}>
         <div class="host-header">
           <div>
             <h1>Tour Economy</h1>
@@ -30,10 +30,15 @@
           </div>
           <div id="hostError" class="error-box" role="alert" hidden></div>
         </section>
-        <section class="panel control-panel">
+        <section id="hostConfigPanel" class="panel control-panel"{% if not host_authenticated %} hidden{% endif %}>
           <div class="settings-heading">
             <h2>게임 설정</h2>
             <div id="serverStatus" class="server-status off">서버 OFF</div>
+          </div>
+          <div class="status-summary" aria-live="polite">
+            <p>게임: <strong id="gameStatusText">설정 중</strong></p>
+            <p>설정: <strong id="configStatusText">저장됨</strong></p>
+            <p>다음 행동: <strong id="nextActionText">설정을 확인하세요</strong></p>
           </div>
           <p class="panel-note">인원과 라운드만 정하면 바로 시작할 수 있습니다.</p>
           <div class="grid host-config-grid">
@@ -73,15 +78,27 @@
           <div id="slots" class="slots"></div>
           <p id="configDirty" class="panel-note" hidden>저장되지 않은 변경사항</p>
           <div id="actionError" class="error-box" role="alert" hidden></div>
-          <div class="actions">
+          <h3>설정</h3>
+          <div class="actions control-group">
             <button id="saveConfig">설정 적용</button>
+          </div>
+          <h3>게임 실행</h3>
+          <div class="actions control-group">
             <button id="startGame">시작</button>
             <button id="pauseGame">일시중지</button>
             <button id="resumeGame">재개</button>
+          </div>
+          <h3>게임 종료</h3>
+          <div class="actions control-group">
             <button id="finishGame" class="danger-action">현재 게임 종료</button>
             <button id="newGame">새 게임 준비</button>
+          </div>
+          <p class="panel-note">현재 게임 종료는 결과를 확정하고, 새 게임 준비는 설정을 유지합니다.</p>
+          <h3>위험 작업</h3>
+          <div class="actions control-group">
             <button id="resetAll" class="danger-action">전체 초기화</button>
           </div>
+          <p class="panel-note">전체 초기화는 설정과 게임 데이터를 기본값으로 복구합니다.</p>
         </section>
 
         <section class="panel bot-dashboard advanced-panel" hidden aria-hidden="true">
@@ -107,7 +124,7 @@
           <div id="botMetrics" class="metric-list"></div>
         </section>
 
-        <section class="panel public-panel">
+        <section class="panel public-panel"{% if not host_authenticated %} hidden{% endif %}>
           <h2>순위와 경제 지표</h2>
           <div id="rankings"></div>
           <div id="economyIndicators"></div>
@@ -115,7 +132,7 @@
         </section>
       </aside>
 
-      <section class="host-log panel">
+      <section class="host-log panel"{% if not host_authenticated %} hidden{% endif %}>
         <details>
           <summary>게임 로그</summary>
           <pre id="stateView"></pre>

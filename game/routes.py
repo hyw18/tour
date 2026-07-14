@@ -7,6 +7,15 @@ from .engine import GameRuleError
 
 
 bp = Blueprint("game", __name__)
+dev_bp = Blueprint("development", __name__)
+
+
+class PermissionDenied(GameRuleError):
+    pass
+
+
+class PhaseConflict(GameRuleError):
+    pass
 
 
 def engine():
@@ -33,23 +42,37 @@ def json_error(message, status=400):
     return jsonify({"error": message}), status
 
 
-def mutating_route(handler):
-    @wraps(handler)
-    def wrapper(*args, **kwargs):
-        key = request.headers.get("Idempotency-Key")
-        try:
-            if engine().state.ended:
-                raise GameRuleError("game has ended")
-            scoped_key = f"{request.path}:{key}" if key else key
-            return jsonify(engine().with_idempotency(scoped_key, lambda: handler(*args, **kwargs)))
-        except GameRuleError as exc:
-            return json_error(str(exc))
+def mutating_route(handler=None, *, allow_ended=False):
+    def decorator(route_handler):
+        @wraps(route_handler)
+        def wrapper(*args, **kwargs):
+            key = request.headers.get("Idempotency-Key")
+            try:
+                scoped_key = f"{request.path}:{key}" if key else key
+                def execute():
+                    if engine().state.ended and not allow_ended:
+                        raise PhaseConflict("current phase does not allow this action")
+                    return route_handler(*args, **kwargs)
 
-    return wrapper
+                return jsonify(engine().with_idempotency(scoped_key, execute))
+            except PermissionDenied as exc:
+                return json_error(str(exc), 403)
+            except PhaseConflict as exc:
+                return json_error(str(exc), 409)
+            except GameRuleError as exc:
+                return json_error(str(exc))
+
+        return wrapper
+
+    return decorator(handler) if handler else decorator
 
 
 @bp.errorhandler(GameRuleError)
 def handle_rule_error(exc):
+    if isinstance(exc, PermissionDenied):
+        return json_error(str(exc), 403)
+    if isinstance(exc, PhaseConflict):
+        return json_error(str(exc), 409)
     return json_error(str(exc))
 
 
@@ -114,6 +137,7 @@ def api_player_private_state(player_id):
 @mutating_route
 def api_config():
     require_host()
+    require_phase("setup", "lobby")
     return engine().configure(request.get_json(force=True, silent=True) or {})
 
 
@@ -128,6 +152,7 @@ def api_join():
 @mutating_route
 def api_start():
     require_host()
+    require_phase("setup", "lobby")
     return engine().start_game()
 
 
@@ -135,6 +160,7 @@ def api_start():
 @mutating_route
 def api_pause():
     require_host()
+    require_phase("active")
     return engine().pause()
 
 
@@ -142,6 +168,7 @@ def api_pause():
 @mutating_route
 def api_resume():
     require_host()
+    require_phase("paused")
     return engine().resume()
 
 
@@ -160,20 +187,24 @@ def api_host_end():
 @mutating_route
 def api_host_finish():
     require_host()
+    require_phase("active", "paused")
     return engine().end_game()
 
 
 @bp.post("/api/host/new-game")
+@mutating_route(allow_ended=True)
 def api_host_new_game():
     require_host()
+    require_phase("finished")
     payload = request.get_json(force=True, silent=True) or {}
-    return jsonify(engine().run_serialized(lambda: engine().prepare_new_game(bool(payload.get("keep_config", True)))))
+    return engine().prepare_new_game(bool(payload.get("keep_config", True)))
 
 
 @bp.post("/api/host/reset")
+@mutating_route(allow_ended=True)
 def api_host_reset():
     require_host()
-    return jsonify(engine().run_serialized(lambda: engine().reset_game(keep_config=False)))
+    return engine().reset_game(keep_config=False)
 
 
 @bp.post("/api/roll")
@@ -293,11 +324,8 @@ def api_event_trigger():
 
 @bp.get("/api/report/<player_id>")
 def api_personal_report(player_id):
-    try:
-        require_player(player_id)
-        return jsonify(engine().personal_report(player_id))
-    except GameRuleError as exc:
-        return json_error(str(exc))
+    require_player(player_id)
+    return jsonify(engine().personal_report(player_id))
 
 
 @bp.get("/api/export/<kind>")
@@ -325,10 +353,11 @@ def api_quick_game_run():
 
 
 @bp.post("/api/bot-simulation")
+@mutating_route(allow_ended=True)
 def api_bot_simulation():
     require_host()
     payload = request.get_json(force=True, silent=True) or {}
-    return jsonify(simulation_jobs().create(payload)), 202
+    return simulation_jobs().create(payload)
 
 
 @bp.get("/api/bot-simulation/<job_id>")
@@ -344,9 +373,10 @@ def api_bot_simulation_result(job_id):
 
 
 @bp.post("/api/bot-simulation/<job_id>/cancel")
+@mutating_route(allow_ended=True)
 def api_bot_simulation_cancel(job_id):
     require_host()
-    return jsonify(simulation_jobs().cancel(job_id))
+    return simulation_jobs().cancel(job_id)
 
 
 @bp.get("/api/bot-simulation/<job_id>/export/<kind>")
@@ -358,7 +388,7 @@ def api_bot_simulation_export(job_id, kind):
     return jsonify(exported)
 
 
-@bp.post("/api/dev/run-bot-simulation")
+@dev_bp.post("/api/dev/run-bot-simulation")
 @mutating_route
 def dev_run_bot_simulation():
     require_debug_tools()
@@ -374,24 +404,29 @@ def require_debug_tools():
 
 def require_host():
     if not authenticator().is_authenticated():
-        raise GameRuleError("host permission is required")
+        raise PermissionDenied("host permission is required")
     if request.method not in {"GET", "HEAD", "OPTIONS"} and not authenticator().valid_csrf(request):
-        raise GameRuleError("invalid CSRF token")
+        raise PermissionDenied("invalid CSRF token")
+
+
+def require_phase(*allowed):
+    if engine().ui_phase() not in allowed:
+        raise PhaseConflict("current phase does not allow this action")
 
 
 def require_player(player_id):
     if request.headers.get("X-Player-Id") != player_id:
-        raise GameRuleError("player permission is required")
+        raise PermissionDenied("player permission is required")
 
 
-@bp.get("/api/dev/state")
+@dev_bp.get("/api/dev/state")
 def dev_state():
     require_debug_tools()
     require_host()
     return jsonify(views().debug())
 
 
-@bp.post("/api/dev/force-end-turn")
+@dev_bp.post("/api/dev/force-end-turn")
 @mutating_route
 def dev_force_end_turn():
     require_debug_tools()
@@ -399,7 +434,7 @@ def dev_force_end_turn():
     return engine().force_end_current_turn()
 
 
-@bp.post("/api/dev/set-position")
+@dev_bp.post("/api/dev/set-position")
 @mutating_route
 def dev_set_position():
     require_debug_tools()
@@ -408,7 +443,7 @@ def dev_set_position():
     return engine().set_player_position(payload.get("player_id"), payload.get("position"))
 
 
-@bp.post("/api/dev/set-cash")
+@dev_bp.post("/api/dev/set-cash")
 @mutating_route
 def dev_set_cash():
     require_debug_tools()
@@ -417,7 +452,7 @@ def dev_set_cash():
     return engine().set_player_cash(payload.get("player_id"), payload.get("cash_won"))
 
 
-@bp.post("/api/dev/set-industrial-rate")
+@dev_bp.post("/api/dev/set-industrial-rate")
 @mutating_route
 def dev_set_industrial_rate():
     require_debug_tools()
@@ -429,7 +464,7 @@ def dev_set_industrial_rate():
     )
 
 
-@bp.post("/api/dev/set-tax-rate")
+@dev_bp.post("/api/dev/set-tax-rate")
 @mutating_route
 def dev_set_tax_rate():
     require_debug_tools()
@@ -438,7 +473,7 @@ def dev_set_tax_rate():
     return engine().set_player_tax_rate(payload.get("player_id"), payload.get("tax_rate_bps"))
 
 
-@bp.post("/api/dev/create-loan")
+@dev_bp.post("/api/dev/create-loan")
 @mutating_route
 def dev_create_loan():
     require_debug_tools()
@@ -447,7 +482,7 @@ def dev_create_loan():
     return engine().create_loan(payload.get("player_id"), payload.get("principal_won"))
 
 
-@bp.post("/api/dev/settle-start")
+@dev_bp.post("/api/dev/settle-start")
 @mutating_route
 def dev_settle_start():
     require_debug_tools()
@@ -456,7 +491,7 @@ def dev_settle_start():
     return engine().settle_start_for_player(payload.get("player_id"))
 
 
-@bp.post("/api/dev/run-laps")
+@dev_bp.post("/api/dev/run-laps")
 @mutating_route
 def dev_run_laps():
     require_debug_tools()
@@ -465,14 +500,14 @@ def dev_run_laps():
     return engine().run_laps(payload.get("player_id"), payload.get("laps", 1))
 
 
-@bp.get("/api/dev/bot-summary")
+@dev_bp.get("/api/dev/bot-summary")
 def dev_bot_summary():
     require_debug_tools()
     require_host()
     return jsonify(engine().bot_economy_summary())
 
 
-@bp.post("/api/dev/create-land")
+@dev_bp.post("/api/dev/create-land")
 @mutating_route
 def dev_create_land():
     require_debug_tools()
@@ -481,7 +516,7 @@ def dev_create_land():
     return engine().create_land_ownership(payload.get("player_id"), payload.get("region_id"))
 
 
-@bp.post("/api/dev/create-building")
+@dev_bp.post("/api/dev/create-building")
 @mutating_route
 def dev_create_building():
     require_debug_tools()
@@ -490,7 +525,7 @@ def dev_create_building():
     return engine().create_building(payload.get("player_id"), payload.get("region_id"), payload.get("building_type"))
 
 
-@bp.post("/api/dev/create-chain")
+@dev_bp.post("/api/dev/create-chain")
 @mutating_route
 def dev_create_chain():
     require_debug_tools()
@@ -499,7 +534,7 @@ def dev_create_chain():
     return engine().create_ownership_chain(payload.get("building_id"), payload.get("chain", []))
 
 
-@bp.post("/api/dev/force-approval")
+@dev_bp.post("/api/dev/force-approval")
 @mutating_route
 def dev_force_approval():
     require_debug_tools()
@@ -508,7 +543,7 @@ def dev_force_approval():
     return engine().force_approval_response(payload.get("player_id"), bool(payload.get("approve")))
 
 
-@bp.post("/api/dev/force-bankruptcy")
+@dev_bp.post("/api/dev/force-bankruptcy")
 @mutating_route
 def dev_force_bankruptcy():
     require_debug_tools()
@@ -517,7 +552,7 @@ def dev_force_bankruptcy():
     return engine().force_bankruptcy(payload.get("player_id"), payload.get("reason", "forced"))
 
 
-@bp.post("/api/dev/set-takeover-decision")
+@dev_bp.post("/api/dev/set-takeover-decision")
 @mutating_route
 def dev_set_takeover_decision():
     require_debug_tools()
@@ -526,7 +561,7 @@ def dev_set_takeover_decision():
     return engine().set_takeover_decision(payload.get("player_id"), bool(payload.get("accept")))
 
 
-@bp.post("/api/dev/respond-takeover")
+@dev_bp.post("/api/dev/respond-takeover")
 @mutating_route
 def dev_respond_takeover():
     require_debug_tools()
@@ -535,7 +570,7 @@ def dev_respond_takeover():
     return engine().respond_land_takeover(payload.get("player_id"), bool(payload.get("accept")))
 
 
-@bp.post("/api/dev/set-no-action-count")
+@dev_bp.post("/api/dev/set-no-action-count")
 @mutating_route
 def dev_set_no_action_count():
     require_debug_tools()
@@ -544,7 +579,7 @@ def dev_set_no_action_count():
     return engine().set_no_action_count(payload.get("player_id"), payload.get("count", 0))
 
 
-@bp.post("/api/dev/skip-revival-wait")
+@dev_bp.post("/api/dev/skip-revival-wait")
 @mutating_route
 def dev_skip_revival_wait():
     require_debug_tools()
@@ -553,7 +588,7 @@ def dev_skip_revival_wait():
     return engine().skip_revival_wait(payload.get("player_id"), payload.get("rounds", 20))
 
 
-@bp.post("/api/dev/revive")
+@dev_bp.post("/api/dev/revive")
 @mutating_route
 def dev_revive():
     require_debug_tools()
@@ -562,7 +597,7 @@ def dev_revive():
     return engine().revive_player(payload.get("player_id"))
 
 
-@bp.post("/api/dev/force-special-sale-dice")
+@dev_bp.post("/api/dev/force-special-sale-dice")
 @mutating_route
 def dev_force_special_sale_dice():
     require_debug_tools()
@@ -571,7 +606,7 @@ def dev_force_special_sale_dice():
     return engine().force_special_sale_dice(payload.get("dice"))
 
 
-@bp.post("/api/dev/set-special-visits")
+@dev_bp.post("/api/dev/set-special-visits")
 @mutating_route
 def dev_set_special_visits():
     require_debug_tools()
@@ -580,7 +615,7 @@ def dev_set_special_visits():
     return engine().set_special_external_visits(payload.get("special_region_id"), payload.get("visits", 0))
 
 
-@bp.post("/api/dev/run-bot-land-trade")
+@dev_bp.post("/api/dev/run-bot-land-trade")
 @mutating_route
 def dev_run_bot_land_trade():
     require_debug_tools()
@@ -589,7 +624,7 @@ def dev_run_bot_land_trade():
     return engine().run_bot_land_trade(payload.get("seller_id"), payload.get("buyer_id"), payload.get("region_id"))
 
 
-@bp.post("/api/dev/change-bot-strategy")
+@dev_bp.post("/api/dev/change-bot-strategy")
 @mutating_route
 def dev_change_bot_strategy():
     require_debug_tools()
@@ -598,7 +633,7 @@ def dev_change_bot_strategy():
     return engine().change_bot_strategy(payload.get("player_id"), payload.get("strategy"))
 
 
-@bp.post("/api/dev/run-next-turns")
+@dev_bp.post("/api/dev/run-next-turns")
 @mutating_route
 def dev_run_next_turns():
     require_debug_tools()
@@ -607,7 +642,7 @@ def dev_run_next_turns():
     return engine().run_next_turns(payload.get("turns", 1))
 
 
-@bp.post("/api/dev/force-dice")
+@dev_bp.post("/api/dev/force-dice")
 @mutating_route
 def dev_force_dice():
     require_debug_tools()
@@ -616,7 +651,7 @@ def dev_force_dice():
     return engine().set_forced_dice(payload.get("dice"))
 
 
-@bp.post("/api/dev/fast-forward-rounds")
+@dev_bp.post("/api/dev/fast-forward-rounds")
 @mutating_route
 def dev_fast_forward_rounds():
     require_debug_tools()
@@ -625,7 +660,7 @@ def dev_fast_forward_rounds():
     return engine().fast_forward_rounds(payload.get("rounds", 1))
 
 
-@bp.post("/api/dev/bot-auto")
+@dev_bp.post("/api/dev/bot-auto")
 @mutating_route
 def dev_bot_auto():
     require_debug_tools()
@@ -634,7 +669,7 @@ def dev_bot_auto():
     return engine().set_bot_auto(payload.get("enabled", False))
 
 
-@bp.post("/api/dev/run-all-bot-max-speed")
+@dev_bp.post("/api/dev/run-all-bot-max-speed")
 @mutating_route
 def dev_run_all_bot_max_speed():
     require_debug_tools()

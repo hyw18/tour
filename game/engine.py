@@ -989,10 +989,23 @@ class GameEngine:
     def with_idempotency(self, key, operation):
         return self.repository.idempotent(key, operation, GameRuleError)
 
+    def ui_phase(self):
+        if self.state.ended:
+            return "finished"
+        if self.state.paused:
+            return "paused"
+        if self.state.phase == "active":
+            return "active"
+        if any(not player.is_bot and player.status != "exited" for player in self.state.players):
+            return "lobby"
+        return "setup"
+
     def public_state(self):
         config = self.state.config
         return {
-            "phase": self.state.phase,
+            "phase": self.ui_phase(),
+            "engine_phase": self.state.phase,
+            "server_status": "online",
             "paused": self.state.paused,
             "ended": self.state.ended,
             "global_round": self.state.global_round,
