@@ -1,0 +1,16 @@
+[tool.ruff]
+line-length = 160
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+disable_error_code = ["annotation-unchecked", "var-annotated", "index", "arg-type", "assignment"]
+
+[tool.bandit]
+skips = ["B311"] # Game dice/strategy randomness is not used for security decisions.

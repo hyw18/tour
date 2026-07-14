@@ -1,5 +1,3 @@
-import os
-
 import pytest
 
 from app import create_app
@@ -8,12 +6,24 @@ from app import create_app
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.delenv("DEBUG_GAME_TOOLS", raising=False)
-    app = create_app({"TESTING": True})
+    app = create_app({"TESTING": True, "APP_MODE": "development"})
     return app.test_client()
 
 
 def post(client, url, body=None, key="k"):
-    return client.post(url, json=body or {}, headers={"Idempotency-Key": key})
+    with client.session_transaction() as session:
+        csrf = session.get("csrf_token")
+    headers = {"Idempotency-Key": key}
+    if csrf:
+        headers["X-CSRF-Token"] = csrf
+    return client.post(url, json=body or {}, headers=headers)
+
+
+def authenticate(client):
+    token = client.application.config["HOST_AUTH"].token
+    response = client.post("/api/host/login", json={"token": token})
+    assert response.status_code == 200
+    return response
 
 
 def test_host_and_player_pages_are_separate(client):
@@ -28,6 +38,8 @@ def test_host_only_start_pause_resume_and_config(client):
     assert response.status_code == 400
     assert "host permission" in response.get_json()["error"]
     client.get("/host")
+    assert post(client, "/api/config", {"total_slots": 2}, "still-blocked").status_code == 400
+    authenticate(client)
     response = post(client, "/api/config", {
         "total_slots": 2,
         "slot_types": ["bot", "bot"],
@@ -44,7 +56,7 @@ def test_host_only_start_pause_resume_and_config(client):
 
 
 def test_join_idempotency_and_server_state(client):
-    client.get("/host")
+    authenticate(client)
     post(client, "/api/config", {
         "total_slots": 2,
         "slot_types": ["human", "bot"],
@@ -58,15 +70,16 @@ def test_join_idempotency_and_server_state(client):
 
 
 def test_debug_tools_are_404_when_env_disabled(client):
-    client.get("/host")
+    authenticate(client)
     response = post(client, "/api/dev/force-dice", {"dice": 3}, "dev")
     assert response.status_code == 404
 
 
 def test_debug_tools_visible_and_operational_when_enabled(monkeypatch):
     monkeypatch.setenv("DEBUG_GAME_TOOLS", "true")
-    app = create_app({"TESTING": True})
+    app = create_app({"TESTING": True, "APP_MODE": "development"})
     client = app.test_client()
+    authenticate(client)
     host = client.get("/host")
     assert b"debug-tools" in host.data
     post(client, "/api/config", {
@@ -109,9 +122,9 @@ def test_debug_tools_visible_and_operational_when_enabled(monkeypatch):
 
 def test_operating_right_routes_are_idempotent_and_server_validated(monkeypatch):
     monkeypatch.setenv("DEBUG_GAME_TOOLS", "true")
-    app = create_app({"TESTING": True})
+    app = create_app({"TESTING": True, "APP_MODE": "development"})
     client = app.test_client()
-    client.get("/host")
+    authenticate(client)
     post(client, "/api/config", {
         "total_slots": 2,
         "slot_types": ["human", "human"],
@@ -142,9 +155,9 @@ def test_operating_right_routes_are_idempotent_and_server_validated(monkeypatch)
 
 def test_event_trigger_and_report_routes(monkeypatch):
     monkeypatch.setenv("DEBUG_GAME_TOOLS", "true")
-    app = create_app({"TESTING": True})
+    app = create_app({"TESTING": True, "APP_MODE": "development"})
     client = app.test_client()
-    client.get("/host")
+    authenticate(client)
     post(client, "/api/config", {"total_slots": 2, "slot_types": ["human", "bot"], "bot_strategies": ["balanced", "balanced"]}, "cfg")
     player = post(client, "/api/join", {"nickname": "A"}, "join").get_json()
     post(client, "/api/start", key="start")
@@ -157,9 +170,9 @@ def test_event_trigger_and_report_routes(monkeypatch):
 
 def test_bankruptcy_revival_debug_routes(monkeypatch):
     monkeypatch.setenv("DEBUG_GAME_TOOLS", "true")
-    app = create_app({"TESTING": True})
+    app = create_app({"TESTING": True, "APP_MODE": "development"})
     client = app.test_client()
-    client.get("/host")
+    authenticate(client)
     post(client, "/api/config", {
         "total_slots": 3,
         "slot_types": ["human", "human", "human"],
@@ -189,9 +202,9 @@ def test_bankruptcy_revival_debug_routes(monkeypatch):
 
 def test_player_purchase_and_build_routes_use_server_state(monkeypatch):
     monkeypatch.setenv("DEBUG_GAME_TOOLS", "true")
-    app = create_app({"TESTING": True})
+    app = create_app({"TESTING": True, "APP_MODE": "development"})
     client = app.test_client()
-    client.get("/host")
+    authenticate(client)
     post(client, "/api/config", {
         "total_slots": 2,
         "slot_types": ["human", "bot"],
@@ -212,9 +225,9 @@ def test_player_purchase_and_build_routes_use_server_state(monkeypatch):
 
 def test_public_private_host_security_and_exports(monkeypatch):
     monkeypatch.setenv("DEBUG_GAME_TOOLS", "true")
-    app = create_app({"TESTING": True})
+    app = create_app({"TESTING": True, "APP_MODE": "development"})
     client = app.test_client()
-    client.get("/host")
+    authenticate(client)
     post(client, "/api/config", {"total_slots": 2, "slot_types": ["human", "bot"], "bot_strategies": ["balanced", "balanced"], "total_rounds": 10}, "cfg")
     player = post(client, "/api/join", {"nickname": "A"}, "join").get_json()
     post(client, "/api/start", key="start")
@@ -230,7 +243,8 @@ def test_public_private_host_security_and_exports(monkeypatch):
     assert private.status_code == 200
     assert "loan" in private.get_json()
     host_state = client.get("/api/host/state")
-    assert "loans" in host_state.get_json()
+    assert "loans" not in host_state.get_json()
+    assert "loans" in client.get("/api/dev/state").get_json()
     csv_response = client.get("/api/export/csv")
     assert csv_response.status_code == 200
     assert b"player_id,nickname,status,total_asset_won,rank" in csv_response.data
@@ -238,9 +252,9 @@ def test_public_private_host_security_and_exports(monkeypatch):
 
 def test_ended_game_blocks_mutating_routes(monkeypatch):
     monkeypatch.setenv("DEBUG_GAME_TOOLS", "true")
-    app = create_app({"TESTING": True})
+    app = create_app({"TESTING": True, "APP_MODE": "development"})
     client = app.test_client()
-    client.get("/host")
+    authenticate(client)
     post(client, "/api/config", {"total_slots": 2, "slot_types": ["human", "human"], "total_rounds": 10}, "cfg")
     player = post(client, "/api/join", {"nickname": "A"}, "join-a").get_json()
     other = post(client, "/api/join", {"nickname": "B"}, "join-b").get_json()
@@ -255,11 +269,11 @@ def test_ended_game_blocks_mutating_routes(monkeypatch):
 
 def test_host_can_end_hosting_during_play_and_after_game_end(monkeypatch):
     monkeypatch.setenv("DEBUG_GAME_TOOLS", "true")
-    app = create_app({"TESTING": True})
+    app = create_app({"TESTING": True, "APP_MODE": "development"})
     client = app.test_client()
-    client.get("/host")
+    authenticate(client)
     post(client, "/api/config", {"total_slots": 2, "slot_types": ["human", "bot"], "bot_strategies": ["balanced", "balanced"]}, "cfg")
-    player = post(client, "/api/join", {"nickname": "A"}, "join").get_json()
+    post(client, "/api/join", {"nickname": "A"}, "join")
     post(client, "/api/start", key="start")
     active_end = post(client, "/api/host/end", key="end-active")
     assert active_end.status_code == 200
@@ -270,7 +284,7 @@ def test_host_can_end_hosting_during_play_and_after_game_end(monkeypatch):
     assert state["public_wealth"]["players"] == []
 
     post(client, "/api/config", {"total_slots": 2, "slot_types": ["human", "human"]}, "cfg2")
-    first = post(client, "/api/join", {"nickname": "B"}, "join-b").get_json()
+    post(client, "/api/join", {"nickname": "B"}, "join-b")
     second = post(client, "/api/join", {"nickname": "C"}, "join-c").get_json()
     post(client, "/api/start", key="start2")
     post(client, "/api/dev/force-bankruptcy", {"player_id": second["id"]}, "bankrupt")

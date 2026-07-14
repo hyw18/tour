@@ -6,11 +6,13 @@ function idempotencyKey() {
 }
 
 async function postJson(url, body) {
+  const csrfToken = window.hostCsrfToken || sessionStorage.getItem("hostCsrfToken");
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Idempotency-Key": idempotencyKey()
+      "Idempotency-Key": idempotencyKey(),
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {})
     },
     body: JSON.stringify(body || {})
   });

@@ -1102,7 +1102,7 @@ def test_revival_rejects_low_remaining_round_gap_and_max_limit():
 def test_bot_revival_strategy_logs_decision():
     engine = GameEngine(DATA_DIR)
     configure(engine, slot_types=["human", "bot"], bot_strategies=["balanced", "balanced"], total_rounds=120)
-    human = engine.join("A")
+    engine.join("A")
     engine.start_game()
     bot = next(player for player in engine.state.players if player.is_bot)
     engine.force_bankruptcy(bot.id, "forced")
@@ -1194,7 +1194,7 @@ def test_game_log_contains_required_categories_and_exports():
 def test_integrated_bot_games_and_pause_preset_paths():
     two = GameEngine(DATA_DIR)
     configure(two, slot_types=["human", "bot"], bot_strategies=["balanced", "aggressive"], total_rounds=10, fast_simulation=True, bot_action_delay=0)
-    human = two.join("A")
+    two.join("A")
     two.start_game()
     while not two.state.ended:
         player = two.current_player()

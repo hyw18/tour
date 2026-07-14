@@ -1,7 +1,7 @@
 import os
 from functools import wraps
 
-from flask import Blueprint, Response, abort, current_app, jsonify, render_template, request, session
+from flask import Blueprint, Response, abort, current_app, jsonify, render_template, request
 
 from .engine import GameRuleError
 
@@ -13,8 +13,20 @@ def engine():
     return current_app.config["GAME_ENGINE"]
 
 
+def authenticator():
+    return current_app.config["HOST_AUTH"]
+
+
+def views():
+    return current_app.config["GAME_VIEWS"]
+
+
+def simulation_jobs():
+    return current_app.config["SIMULATION_JOBS"]
+
+
 def debug_tools_enabled():
-    return os.environ.get("DEBUG_GAME_TOOLS") == "true"
+    return os.environ.get("DEBUG_GAME_TOOLS", "").lower() == "true" and current_app.config.get("APP_MODE") == "development"
 
 
 def json_error(message, status=400):
@@ -44,8 +56,36 @@ def handle_rule_error(exc):
 @bp.route("/")
 @bp.route("/host")
 def host_page():
-    session["is_host"] = True
-    return render_template("host.html", debug_tools=debug_tools_enabled())
+    return render_template("host.html", debug_tools=debug_tools_enabled(), host_authenticated=authenticator().is_authenticated())
+
+
+@bp.post("/api/host/login")
+def api_host_login():
+    payload = request.get_json(force=True, silent=True) or {}
+    result = authenticator().login(payload.get("token"), request.remote_addr or "unknown")
+    if result == "rate_limited":
+        return json_error("too many host login attempts", 429)
+    if result != "authenticated":
+        return json_error("invalid host token", 401)
+    return jsonify({"authenticated": True, "csrf_token": authenticator().csrf_token()})
+
+
+@bp.post("/api/host/logout")
+def api_host_logout():
+    if not authenticator().is_authenticated():
+        return json_error("host permission is required", 403)
+    if not authenticator().valid_csrf(request):
+        return json_error("invalid CSRF token", 403)
+    authenticator().logout()
+    return jsonify({"authenticated": False})
+
+
+@bp.get("/api/host/session")
+def api_host_session():
+    return jsonify({
+        "authenticated": authenticator().is_authenticated(),
+        "csrf_token": authenticator().csrf_token(),
+    })
 
 
 @bp.route("/player")
@@ -55,15 +95,13 @@ def player_page():
 
 @bp.get("/api/state")
 def api_state():
-    engine().advance_automation()
-    return jsonify(engine().client_public_state())
+    return jsonify(views().public())
 
 
 @bp.get("/api/host/state")
 def api_host_state():
     require_host()
-    engine().advance_automation()
-    return jsonify(engine().host_state())
+    return jsonify(views().host())
 
 
 @bp.get("/api/player/<player_id>/private")
@@ -116,6 +154,26 @@ def api_host_end():
         return jsonify(engine().with_idempotency(scoped_key, lambda: engine().close_hosting()))
     except GameRuleError as exc:
         return json_error(str(exc))
+
+
+@bp.post("/api/host/finish")
+@mutating_route
+def api_host_finish():
+    require_host()
+    return engine().end_game()
+
+
+@bp.post("/api/host/new-game")
+def api_host_new_game():
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return jsonify(engine().run_serialized(lambda: engine().prepare_new_game(bool(payload.get("keep_config", True)))))
+
+
+@bp.post("/api/host/reset")
+def api_host_reset():
+    require_host()
+    return jsonify(engine().run_serialized(lambda: engine().reset_game(keep_config=False)))
 
 
 @bp.post("/api/roll")
@@ -267,11 +325,37 @@ def api_quick_game_run():
 
 
 @bp.post("/api/bot-simulation")
-@mutating_route
 def api_bot_simulation():
     require_host()
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().run_bot_simulation(payload)
+    return jsonify(simulation_jobs().create(payload)), 202
+
+
+@bp.get("/api/bot-simulation/<job_id>")
+def api_bot_simulation_status(job_id):
+    require_host()
+    return jsonify(simulation_jobs().get(job_id))
+
+
+@bp.get("/api/bot-simulation/<job_id>/result")
+def api_bot_simulation_result(job_id):
+    require_host()
+    return jsonify(simulation_jobs().get(job_id, include_results=True))
+
+
+@bp.post("/api/bot-simulation/<job_id>/cancel")
+def api_bot_simulation_cancel(job_id):
+    require_host()
+    return jsonify(simulation_jobs().cancel(job_id))
+
+
+@bp.get("/api/bot-simulation/<job_id>/export/<kind>")
+def api_bot_simulation_export(job_id, kind):
+    require_host()
+    exported = simulation_jobs().export(job_id, kind)
+    if kind == "csv":
+        return Response(exported, mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename=simulation-{job_id}.csv"})
+    return jsonify(exported)
 
 
 @bp.post("/api/dev/run-bot-simulation")
@@ -289,13 +373,22 @@ def require_debug_tools():
 
 
 def require_host():
-    if not session.get("is_host"):
+    if not authenticator().is_authenticated():
         raise GameRuleError("host permission is required")
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and not authenticator().valid_csrf(request):
+        raise GameRuleError("invalid CSRF token")
 
 
 def require_player(player_id):
     if request.headers.get("X-Player-Id") != player_id:
         raise GameRuleError("player permission is required")
+
+
+@bp.get("/api/dev/state")
+def dev_state():
+    require_debug_tools()
+    require_host()
+    return jsonify(views().debug())
 
 
 @bp.post("/api/dev/force-end-turn")

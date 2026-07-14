@@ -19,6 +19,7 @@ from .models import (
     new_id,
 )
 from .economy import apply_rate, apply_rate_rounded_50k, round_to_50k
+from .state import StateRepository
 
 
 class GameRuleError(ValueError):
@@ -26,6 +27,7 @@ class GameRuleError(ValueError):
 
 
 class GameEngine:
+    MAX_PROCESSED_KEYS = 1_000
     COMMERCIAL_VISIT_FEE_RATES = {
         1: (270, 1000),
         2: (243, 1000),
@@ -35,10 +37,16 @@ class GameEngine:
     }
 
     def __init__(self, data_dir):
+        self.data_dir = data_dir
         self.data = GameDataLoader(data_dir).load()
         self.state = GameState()
         self.state.special_values = {item["id"]: item["initial_price"] for item in self.data["special_regions"]}
         self._human_join_order = 0
+        self.repository = StateRepository(self.state, self.MAX_PROCESSED_KEYS)
+
+    def run_serialized(self, operation):
+        """Run one state operation under the game-wide reentrant lock."""
+        return self.repository.serialized(operation)
 
     def configure(self, payload):
         self._require_lobby()
@@ -98,11 +106,25 @@ class GameEngine:
         self.state.global_round = 1
         self._start_turn()
         self._log("game", "started", {"players": [player.id for player in self.state.players]})
-        self.advance_automation()
+        if self.state.config.fast_simulation:
+            self.advance_automation()
         return self.public_state()
 
     def close_hosting(self):
+        return self.reset_game(keep_config=False)
+
+    def end_game(self):
+        self._require_started()
+        return self.finalize_game("host_ended")
+
+    def prepare_new_game(self, keep_config=True):
+        return self.reset_game(keep_config=keep_config)
+
+    def reset_game(self, keep_config=False):
+        config = deepcopy(self.state.config) if keep_config else HostConfig()
         self.state = GameState()
+        self.repository.replace(self.state)
+        self.state.config = config
         self.state.special_values = {item["id"]: item["initial_price"] for item in self.data["special_regions"]}
         self._human_join_order = 0
         return self.client_public_state()
@@ -119,7 +141,6 @@ class GameEngine:
         if self.state.paused:
             self.state.paused = False
             self.state.turn_started_at = monotonic()
-        self.advance_automation()
         return self.public_state()
 
     def roll_dice(self, player_id):
@@ -553,7 +574,6 @@ class GameEngine:
         event_enabled = bool(config.get("events_enabled", True))
         event_frequency = max(0, int(config.get("event_frequency", 1)))
         start_cash = int(config.get("starting_cash", 10_000_000))
-        start_bonus = int(config.get("start_bonus", START_BONUS_WON))
         strategy_stats = {}
         first_bankruptcy_rounds = []
         final_assets = []
@@ -922,7 +942,7 @@ class GameEngine:
             self.take_turn_for_player(player.id, source="bot")
         return self.public_state()
 
-    def advance_automation(self):
+    def advance_automation(self, force=False):
         if self.state.phase != "active" or self.state.paused or self.state.ended:
             return
         self.evaluate_bot_revivals()
@@ -938,7 +958,7 @@ class GameEngine:
             player = self.current_player()
             if not player or not player.is_bot:
                 return
-            if not self.state.bot_auto_enabled and not self.state.config.fast_simulation:
+            if not force and not self.state.bot_auto_enabled and not self.state.config.fast_simulation:
                 return
             if not self.should_run_current_bot():
                 return
@@ -967,13 +987,7 @@ class GameEngine:
         return self.state.turn_elapsed_before_pause + (monotonic() - self.state.turn_started_at)
 
     def with_idempotency(self, key, operation):
-        if not key:
-            raise GameRuleError("Idempotency-Key header is required")
-        if key in self.state.processed_keys:
-            return deepcopy(self.state.processed_keys[key])
-        result = operation()
-        self.state.processed_keys[key] = deepcopy(result)
-        return result
+        return self.repository.idempotent(key, operation, GameRuleError)
 
     def public_state(self):
         config = self.state.config
@@ -2062,7 +2076,7 @@ class GameEngine:
         return self._clamp(rate, self.state.industrial_return_min_bps, self.state.industrial_return_max_bps)
 
     def _industry_mix_impact_bps(self, region_id):
-        region = self.region_by_id(region_id)
+        self.region_by_id(region_id)
         primary = self._event_add_bps("industry_cycle", None, region_id)
         secondary = self._event_add_bps("industry_cycle", None, region_id)
         return apply_rate(primary, 70, 100) + apply_rate(secondary, 30, 100)
@@ -2190,7 +2204,6 @@ class GameEngine:
         active = [player for player in self.state.players if player.status == "active"]
         if len(active) <= 1:
             return bool(active)
-        totals = self._final_asset_totals()
         return len(active) == 1
 
     def _record_asset_snapshot(self):

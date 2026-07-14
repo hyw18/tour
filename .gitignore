@@ -5,5 +5,7 @@ __pycache__/
 .flaskenv
 instance/
 .pytest_cache/
+.coverage
+htmlcov/
 validation_failures/
 validation_results*.json

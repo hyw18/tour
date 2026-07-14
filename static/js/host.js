@@ -10,7 +10,55 @@ const botMetrics = document.querySelector("#botMetrics");
 const simProgress = document.querySelector("#simProgress");
 
 let simulationRunning = false;
+let simulationJobId = null;
 let roomOpened = false;
+let configLoaded = false;
+let configDirty = false;
+let hostPollTimer = null;
+
+function setHostAuthenticated(authenticated) {
+  document.querySelector(".host-dashboard").dataset.authenticated = String(authenticated);
+  document.querySelector("#hostAuthStatus").textContent = authenticated ? "호스트 인증 완료" : "호스트 인증이 필요합니다";
+  document.querySelectorAll(".host-board-panel, .host-side > section:not(#hostAuthPanel), .host-log, .debug-tools")
+    .forEach((element) => { element.hidden = !authenticated; });
+}
+
+function stopHostPolling() {
+  if (hostPollTimer !== null) window.clearInterval(hostPollTimer);
+  hostPollTimer = null;
+}
+
+function startHostPolling() {
+  if (hostPollTimer !== null) return;
+  hostPollTimer = window.setInterval(async () => {
+    try {
+      await refresh();
+    } catch (error) {
+      if (error.message === "host-auth-required") {
+        stopHostPolling();
+        setHostAuthenticated(false);
+      } else {
+        showError(error.message);
+      }
+    }
+  }, 1000);
+}
+
+function showError(message) {
+  const box = document.querySelector("#actionError");
+  box.textContent = message;
+  box.hidden = !message;
+}
+
+async function loadHostSession() {
+  const response = await fetch("/api/host/session");
+  const data = await response.json();
+  window.hostCsrfToken = data.csrf_token || "";
+  if (data.csrf_token) sessionStorage.setItem("hostCsrfToken", data.csrf_token);
+  else sessionStorage.removeItem("hostCsrfToken");
+  setHostAuthenticated(data.authenticated);
+  return data.authenticated;
+}
 
 function money(value) {
   return new Intl.NumberFormat("ko-KR").format(Math.trunc(value || 0));
@@ -29,11 +77,14 @@ function cellName(cell) {
 
 async function getHostState() {
   const response = await fetch("/api/host/state");
-  if (!response.ok) return getState();
+  if (!response.ok) {
+    if ([400, 401, 403].includes(response.status)) throw new Error("host-auth-required");
+    throw new Error("호스트 상태를 불러오지 못했습니다");
+  }
   return response.json();
 }
 
-function renderSlots() {
+function renderSlots(slotTypes = [], strategies = []) {
   const count = Number(document.querySelector("#totalSlots").value);
   slotsEl.innerHTML = "";
   for (let index = 0; index < count; index += 1) {
@@ -53,8 +104,29 @@ function renderSlots() {
       </select>
     `;
     slotsEl.append(row);
+    row.querySelector("[data-slot-type]").value = slotTypes[index] || "human";
+    row.querySelector("[data-bot-strategy]").value = strategies[index] || "balanced";
   }
   syncSlotStrategyVisibility();
+}
+
+function renderConfig(config) {
+  if (!config || (configDirty && configLoaded)) return;
+  document.querySelector("#totalSlots").value = String(config.total_slots);
+  document.querySelector("#totalRounds").value = String(config.total_rounds);
+  document.querySelector("#turnLimit").value = config.turn_limit_seconds == null ? "unlimited" : String(config.turn_limit_seconds);
+  document.querySelector("#botDelay").value = String(config.bot_action_delay);
+  document.querySelector("#fastSimulation").checked = Boolean(config.fast_simulation);
+  renderSlots(config.slot_types, config.bot_strategies);
+  configLoaded = true;
+  configDirty = false;
+  document.querySelector("#configDirty").hidden = true;
+}
+
+function applyPhaseLocks(state) {
+  const locked = ["active", "paused", "ended"].includes(state.phase);
+  document.querySelectorAll("#totalSlots,#totalRounds,#turnLimit,#botDelay,#fastSimulation,[data-slot-type],[data-bot-strategy],#saveConfig")
+    .forEach((element) => { element.disabled = locked; });
 }
 
 function syncSlotStrategyVisibility() {
@@ -161,17 +233,31 @@ function renderBotMetrics(result) {
 
 async function refresh() {
   const state = await getHostState();
+  if (state.error) throw new Error(state.error);
+  renderConfig(state.config);
+  applyPhaseLocks(state);
   renderHostBoard(state);
   renderPublicPanels(state);
   renderLog(state);
   renderBotMetrics(state.simulation_results);
 }
 
-document.querySelector("#totalSlots").addEventListener("change", renderSlots);
+document.querySelector("#totalSlots").addEventListener("change", () => renderSlots());
+document.querySelector(".control-panel").addEventListener("input", (event) => {
+  if (!event.target.matches("button")) {
+    configDirty = true;
+    document.querySelector("#configDirty").hidden = false;
+  }
+});
 document.querySelector("#saveConfig").addEventListener("click", async () => {
-  await postJson("/api/config", configPayload());
-  roomOpened = true;
-  await refresh();
+  try {
+    const saved = await postJson("/api/config", configPayload());
+    configDirty = false;
+    renderConfig(saved.config);
+    roomOpened = true;
+    showError("");
+    await refresh();
+  } catch (error) { showError(error.message); }
 });
 document.querySelector("#startGame").addEventListener("click", async () => {
   roomOpened = true;
@@ -194,12 +280,35 @@ document.querySelector("#resumeGame").addEventListener("click", async () => {
   await postJson("/api/resume");
   await refresh();
 });
-document.querySelector("#endHosting").addEventListener("click", async () => {
-  await postJson("/api/host/end");
-  roomOpened = false;
-  stateView.textContent = "서버 OFF · 호스팅이 종료되었습니다";
-  renderSlots();
-  await refresh();
+document.querySelector("#finishGame").addEventListener("click", async () => {
+  try { await postJson("/api/host/finish"); await refresh(); } catch (error) { showError(error.message); }
+});
+document.querySelector("#newGame").addEventListener("click", async () => {
+  try { await postJson("/api/host/new-game", { keep_config: true }); configLoaded = false; await refresh(); } catch (error) { showError(error.message); }
+});
+document.querySelector("#resetAll").addEventListener("click", async () => {
+  if (!window.confirm("게임 상태와 설정을 모두 초기화할까요?")) return;
+  try { await postJson("/api/host/reset"); configLoaded = false; await refresh(); } catch (error) { showError(error.message); }
+});
+
+document.querySelector("#hostLogin").addEventListener("click", async () => {
+  const box = document.querySelector("#hostError");
+  try {
+    const result = await postJson("/api/host/login", { token: document.querySelector("#hostToken").value });
+    window.hostCsrfToken = result.csrf_token;
+    sessionStorage.setItem("hostCsrfToken", result.csrf_token);
+    box.hidden = true;
+    await loadHostSession();
+    await refresh();
+    startHostPolling();
+  } catch (error) { box.textContent = error.message; box.hidden = false; }
+});
+document.querySelector("#hostLogout").addEventListener("click", async () => {
+  try {
+    await postJson("/api/host/logout");
+    stopHostPolling();
+    await loadHostSession();
+  } catch (error) { showError(error.message); }
 });
 
 document.querySelector("#quick10").addEventListener("click", async () => {
@@ -218,7 +327,7 @@ document.querySelector("#runSimulation").addEventListener("click", async () => {
   simulationRunning = true;
   simProgress.textContent = "실행 중";
   try {
-    const result = await postJson("/api/bot-simulation", {
+    const job = await postJson("/api/bot-simulation", {
       players: Number(document.querySelector("#totalSlots").value),
       total_rounds: Number(document.querySelector("#totalRounds").value),
       events_enabled: document.querySelector("#simEvents").value === "true",
@@ -226,17 +335,30 @@ document.querySelector("#runSimulation").addEventListener("click", async () => {
       seed: Number(document.querySelector("#simSeed").value),
       runs: Number(document.querySelector("#simRuns").value)
     });
-    if (simulationRunning) {
-      simProgress.textContent = `${result.runs}회 완료`;
-      renderBotMetrics(result);
+    simulationJobId = job.id;
+    while (simulationRunning) {
+      const response = await fetch(`/api/bot-simulation/${job.id}`);
+      const status = await response.json();
+      simProgress.textContent = `${status.completed_runs}/${status.total_runs} · ${status.status}`;
+      if (["completed", "failed", "cancelled"].includes(status.status)) {
+        simulationRunning = false;
+        if (status.status === "completed") {
+          const resultResponse = await fetch(`/api/bot-simulation/${job.id}/result`);
+          const result = await resultResponse.json();
+          renderBotMetrics(result.results.at(-1));
+        }
+        break;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
     }
   } catch (error) {
     simProgress.textContent = error.message;
   }
 });
-document.querySelector("#stopSimulation").addEventListener("click", () => {
+document.querySelector("#stopSimulation").addEventListener("click", async () => {
   simulationRunning = false;
   simProgress.textContent = "중단 요청됨";
+  if (simulationJobId) await postJson(`/api/bot-simulation/${simulationJobId}/cancel`);
 });
 
 document.querySelectorAll("[data-dev]").forEach((button) => {
@@ -314,5 +436,12 @@ document.querySelectorAll("[data-dev]").forEach((button) => {
 });
 
 renderSlots();
-refresh();
-setInterval(refresh, 1000);
+loadHostSession().then(async (authenticated) => {
+  if (!authenticated) return;
+  try {
+    await refresh();
+    startHostPolling();
+  } catch (error) {
+    showError(error.message);
+  }
+});

@@ -20,6 +20,16 @@
       </section>
 
       <aside class="host-side">
+        <section id="hostAuthPanel" class="panel control-panel">
+          <h2>호스트 인증</h2>
+          <p id="hostAuthStatus">{% if host_authenticated %}인증됨{% else %}서버 터미널에 표시된 토큰을 입력하세요.{% endif %}</p>
+          <div class="actions">
+            <input id="hostToken" type="password" autocomplete="current-password" placeholder="호스트 토큰">
+            <button id="hostLogin">로그인</button>
+            <button id="hostLogout">로그아웃</button>
+          </div>
+          <div id="hostError" class="error-box" role="alert" hidden></div>
+        </section>
         <section class="panel control-panel">
           <div class="settings-heading">
             <h2>게임 설정</h2>
@@ -61,12 +71,16 @@
             <label class="inline"><input id="fastSimulation" type="checkbox"> 애니메이션 생략</label>
           </div>
           <div id="slots" class="slots"></div>
+          <p id="configDirty" class="panel-note" hidden>저장되지 않은 변경사항</p>
+          <div id="actionError" class="error-box" role="alert" hidden></div>
           <div class="actions">
             <button id="saveConfig">설정 적용</button>
             <button id="startGame">시작</button>
             <button id="pauseGame">일시중지</button>
             <button id="resumeGame">재개</button>
-            <button id="endHosting" class="danger-action">서버 끝내기</button>
+            <button id="finishGame" class="danger-action">현재 게임 종료</button>
+            <button id="newGame">새 게임 준비</button>
+            <button id="resetAll" class="danger-action">전체 초기화</button>
           </div>
         </section>
 
