@@ -1,0 +1,8 @@
+[
+  {"id": "housing", "name": "주거"},
+  {"id": "commerce", "name": "상업"},
+  {"id": "manufacturing", "name": "산업"},
+  {"id": "mixed", "name": "복합"},
+  {"id": "tourism", "name": "관광"},
+  {"id": "logistics", "name": "물류"}
+]

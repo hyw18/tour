@@ -1,0 +1,27 @@
+function idempotencyKey() {
+  if (window.crypto && window.crypto.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random()}`;
+}
+
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey()
+    },
+    body: JSON.stringify(body || {})
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || "request failed");
+  }
+  return data;
+}
+
+async function getState() {
+  const response = await fetch("/api/state");
+  return response.json();
+}

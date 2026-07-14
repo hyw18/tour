@@ -1,0 +1,549 @@
+import os
+from functools import wraps
+
+from flask import Blueprint, Response, abort, current_app, jsonify, render_template, request, session
+
+from .engine import GameRuleError
+
+
+bp = Blueprint("game", __name__)
+
+
+def engine():
+    return current_app.config["GAME_ENGINE"]
+
+
+def debug_tools_enabled():
+    return os.environ.get("DEBUG_GAME_TOOLS") == "true"
+
+
+def json_error(message, status=400):
+    return jsonify({"error": message}), status
+
+
+def mutating_route(handler):
+    @wraps(handler)
+    def wrapper(*args, **kwargs):
+        key = request.headers.get("Idempotency-Key")
+        try:
+            if engine().state.ended:
+                raise GameRuleError("game has ended")
+            scoped_key = f"{request.path}:{key}" if key else key
+            return jsonify(engine().with_idempotency(scoped_key, lambda: handler(*args, **kwargs)))
+        except GameRuleError as exc:
+            return json_error(str(exc))
+
+    return wrapper
+
+
+@bp.errorhandler(GameRuleError)
+def handle_rule_error(exc):
+    return json_error(str(exc))
+
+
+@bp.route("/")
+@bp.route("/host")
+def host_page():
+    session["is_host"] = True
+    return render_template("host.html", debug_tools=debug_tools_enabled())
+
+
+@bp.route("/player")
+def player_page():
+    return render_template("player.html")
+
+
+@bp.get("/api/state")
+def api_state():
+    engine().advance_automation()
+    return jsonify(engine().client_public_state())
+
+
+@bp.get("/api/host/state")
+def api_host_state():
+    require_host()
+    engine().advance_automation()
+    return jsonify(engine().host_state())
+
+
+@bp.get("/api/player/<player_id>/private")
+def api_player_private_state(player_id):
+    require_player(player_id)
+    return jsonify(engine().player_private_state(player_id))
+
+
+@bp.post("/api/config")
+@mutating_route
+def api_config():
+    require_host()
+    return engine().configure(request.get_json(force=True, silent=True) or {})
+
+
+@bp.post("/api/join")
+@mutating_route
+def api_join():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().join(payload.get("nickname"))
+
+
+@bp.post("/api/start")
+@mutating_route
+def api_start():
+    require_host()
+    return engine().start_game()
+
+
+@bp.post("/api/pause")
+@mutating_route
+def api_pause():
+    require_host()
+    return engine().pause()
+
+
+@bp.post("/api/resume")
+@mutating_route
+def api_resume():
+    require_host()
+    return engine().resume()
+
+
+@bp.post("/api/host/end")
+def api_host_end():
+    require_host()
+    key = request.headers.get("Idempotency-Key")
+    try:
+        scoped_key = f"{request.path}:{key}" if key else key
+        return jsonify(engine().with_idempotency(scoped_key, lambda: engine().close_hosting()))
+    except GameRuleError as exc:
+        return json_error(str(exc))
+
+
+@bp.post("/api/roll")
+@mutating_route
+def api_roll():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().roll_dice(payload.get("player_id"))
+
+
+@bp.post("/api/end-turn")
+@mutating_route
+def api_end_turn():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().end_turn(payload.get("player_id"))
+
+
+@bp.post("/api/purchase-land")
+@mutating_route
+def api_purchase_land():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().purchase_land(payload.get("player_id"))
+
+
+@bp.post("/api/decline-action")
+@mutating_route
+def api_decline_action():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().decline_pending_action(payload.get("player_id"))
+
+
+@bp.post("/api/build")
+@mutating_route
+def api_build():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().build_on_land(payload.get("player_id"), payload.get("building_type"))
+
+
+@bp.post("/api/sell-building")
+@mutating_route
+def api_sell_building():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().sell_building(payload.get("player_id"), payload.get("building_id"))
+
+
+@bp.post("/api/purchase-special")
+@mutating_route
+def api_purchase_special():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().purchase_special_region(payload.get("player_id"))
+
+
+@bp.post("/api/trade/land/propose")
+@mutating_route
+def api_trade_land_propose():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().propose_land_trade(payload.get("requester_id"), payload.get("buyer_id"), payload.get("region_id"))
+
+
+@bp.post("/api/trade/land/respond")
+@mutating_route
+def api_trade_land_respond():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().respond_land_trade(payload.get("responder_id"), bool(payload.get("accept")))
+
+
+@bp.post("/api/operating-right/transfer/propose")
+@mutating_route
+def api_operating_right_transfer_propose():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().propose_operating_right_transfer(
+        payload.get("requester_id"),
+        payload.get("target_id"),
+        payload.get("building_id"),
+        payload.get("price_won"),
+    )
+
+
+@bp.post("/api/operating-right/transfer/respond")
+@mutating_route
+def api_operating_right_transfer_respond():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().respond_operating_right_transfer(payload.get("responder_id"), bool(payload.get("accept")))
+
+
+@bp.post("/api/usage-change/request")
+@mutating_route
+def api_usage_change_request():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().request_usage_change(payload.get("requester_id"), payload.get("building_id"), payload.get("new_type"))
+
+
+@bp.post("/api/usage-change/respond")
+@mutating_route
+def api_usage_change_respond():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().respond_usage_change(payload.get("approver_id"), bool(payload.get("approve")))
+
+
+@bp.post("/api/operating-right/recall")
+@mutating_route
+def api_operating_right_recall():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().recall_operating_rights(payload.get("requester_id"), payload.get("building_id"))
+
+
+@bp.post("/api/event/trigger")
+@mutating_route
+def api_event_trigger():
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().trigger_event(
+        payload.get("event_id"),
+        payload.get("player_id"),
+        payload.get("region_id"),
+        payload.get("source", "manual"),
+    )
+
+
+@bp.get("/api/report/<player_id>")
+def api_personal_report(player_id):
+    try:
+        require_player(player_id)
+        return jsonify(engine().personal_report(player_id))
+    except GameRuleError as exc:
+        return json_error(str(exc))
+
+
+@bp.get("/api/export/<kind>")
+def api_export(kind):
+    require_host()
+    exported = engine().export_results(kind)
+    if kind == "csv":
+        return Response(exported["body"], mimetype=exported["content_type"], headers={"Content-Disposition": f"attachment; filename={exported['filename']}"})
+    return jsonify(exported)
+
+
+@bp.post("/api/quick-game/configure")
+@mutating_route
+def api_quick_game_configure():
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().configure_quick_game(payload.get("preset", "custom"), payload.get("custom"), payload.get("pause_at_round"))
+
+
+@bp.post("/api/quick-game/run")
+@mutating_route
+def api_quick_game_run():
+    require_host()
+    return engine().run_quick_game()
+
+
+@bp.post("/api/bot-simulation")
+@mutating_route
+def api_bot_simulation():
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().run_bot_simulation(payload)
+
+
+@bp.post("/api/dev/run-bot-simulation")
+@mutating_route
+def dev_run_bot_simulation():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().run_bot_simulation(payload)
+
+
+def require_debug_tools():
+    if not debug_tools_enabled():
+        abort(404)
+
+
+def require_host():
+    if not session.get("is_host"):
+        raise GameRuleError("host permission is required")
+
+
+def require_player(player_id):
+    if request.headers.get("X-Player-Id") != player_id:
+        raise GameRuleError("player permission is required")
+
+
+@bp.post("/api/dev/force-end-turn")
+@mutating_route
+def dev_force_end_turn():
+    require_debug_tools()
+    require_host()
+    return engine().force_end_current_turn()
+
+
+@bp.post("/api/dev/set-position")
+@mutating_route
+def dev_set_position():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().set_player_position(payload.get("player_id"), payload.get("position"))
+
+
+@bp.post("/api/dev/set-cash")
+@mutating_route
+def dev_set_cash():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().set_player_cash(payload.get("player_id"), payload.get("cash_won"))
+
+
+@bp.post("/api/dev/set-industrial-rate")
+@mutating_route
+def dev_set_industrial_rate():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().set_industrial_return_rate(
+        payload.get("rate_bps"),
+        bool(payload.get("explicit_override", False)),
+    )
+
+
+@bp.post("/api/dev/set-tax-rate")
+@mutating_route
+def dev_set_tax_rate():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().set_player_tax_rate(payload.get("player_id"), payload.get("tax_rate_bps"))
+
+
+@bp.post("/api/dev/create-loan")
+@mutating_route
+def dev_create_loan():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().create_loan(payload.get("player_id"), payload.get("principal_won"))
+
+
+@bp.post("/api/dev/settle-start")
+@mutating_route
+def dev_settle_start():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().settle_start_for_player(payload.get("player_id"))
+
+
+@bp.post("/api/dev/run-laps")
+@mutating_route
+def dev_run_laps():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().run_laps(payload.get("player_id"), payload.get("laps", 1))
+
+
+@bp.get("/api/dev/bot-summary")
+def dev_bot_summary():
+    require_debug_tools()
+    require_host()
+    return jsonify(engine().bot_economy_summary())
+
+
+@bp.post("/api/dev/create-land")
+@mutating_route
+def dev_create_land():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().create_land_ownership(payload.get("player_id"), payload.get("region_id"))
+
+
+@bp.post("/api/dev/create-building")
+@mutating_route
+def dev_create_building():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().create_building(payload.get("player_id"), payload.get("region_id"), payload.get("building_type"))
+
+
+@bp.post("/api/dev/create-chain")
+@mutating_route
+def dev_create_chain():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().create_ownership_chain(payload.get("building_id"), payload.get("chain", []))
+
+
+@bp.post("/api/dev/force-approval")
+@mutating_route
+def dev_force_approval():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().force_approval_response(payload.get("player_id"), bool(payload.get("approve")))
+
+
+@bp.post("/api/dev/force-bankruptcy")
+@mutating_route
+def dev_force_bankruptcy():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().force_bankruptcy(payload.get("player_id"), payload.get("reason", "forced"))
+
+
+@bp.post("/api/dev/set-takeover-decision")
+@mutating_route
+def dev_set_takeover_decision():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().set_takeover_decision(payload.get("player_id"), bool(payload.get("accept")))
+
+
+@bp.post("/api/dev/respond-takeover")
+@mutating_route
+def dev_respond_takeover():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().respond_land_takeover(payload.get("player_id"), bool(payload.get("accept")))
+
+
+@bp.post("/api/dev/set-no-action-count")
+@mutating_route
+def dev_set_no_action_count():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().set_no_action_count(payload.get("player_id"), payload.get("count", 0))
+
+
+@bp.post("/api/dev/skip-revival-wait")
+@mutating_route
+def dev_skip_revival_wait():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().skip_revival_wait(payload.get("player_id"), payload.get("rounds", 20))
+
+
+@bp.post("/api/dev/revive")
+@mutating_route
+def dev_revive():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().revive_player(payload.get("player_id"))
+
+
+@bp.post("/api/dev/force-special-sale-dice")
+@mutating_route
+def dev_force_special_sale_dice():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().force_special_sale_dice(payload.get("dice"))
+
+
+@bp.post("/api/dev/set-special-visits")
+@mutating_route
+def dev_set_special_visits():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().set_special_external_visits(payload.get("special_region_id"), payload.get("visits", 0))
+
+
+@bp.post("/api/dev/run-bot-land-trade")
+@mutating_route
+def dev_run_bot_land_trade():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().run_bot_land_trade(payload.get("seller_id"), payload.get("buyer_id"), payload.get("region_id"))
+
+
+@bp.post("/api/dev/change-bot-strategy")
+@mutating_route
+def dev_change_bot_strategy():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().change_bot_strategy(payload.get("player_id"), payload.get("strategy"))
+
+
+@bp.post("/api/dev/run-next-turns")
+@mutating_route
+def dev_run_next_turns():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().run_next_turns(payload.get("turns", 1))
+
+
+@bp.post("/api/dev/force-dice")
+@mutating_route
+def dev_force_dice():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().set_forced_dice(payload.get("dice"))
+
+
+@bp.post("/api/dev/fast-forward-rounds")
+@mutating_route
+def dev_fast_forward_rounds():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().fast_forward_rounds(payload.get("rounds", 1))
+
+
+@bp.post("/api/dev/bot-auto")
+@mutating_route
+def dev_bot_auto():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().set_bot_auto(payload.get("enabled", False))
+
+
+@bp.post("/api/dev/run-all-bot-max-speed")
+@mutating_route
+def dev_run_all_bot_max_speed():
+    require_debug_tools()
+    require_host()
+    return engine().run_all_bot_max_speed()

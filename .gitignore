@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.flaskenv
+instance/
+.pytest_cache/
+validation_failures/
+validation_results*.json

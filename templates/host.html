@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>경제 보드게임 호스트</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  </head>
+  <body class="host-screen">
+    <main class="host-dashboard">
+      <section class="host-board-panel">
+        <div class="host-header">
+          <div>
+            <h1>Tour Economy</h1>
+            <p>전략 보드게임 테이블</p>
+          </div>
+          <div id="hostPhase" class="badge sapphire">대기</div>
+        </div>
+        <div id="hostBoardGrid" class="board-grid host-board" aria-label="호스트 보드"></div>
+      </section>
+
+      <aside class="host-side">
+        <section class="panel control-panel">
+          <div class="settings-heading">
+            <h2>게임 설정</h2>
+            <div id="serverStatus" class="server-status off">서버 OFF</div>
+          </div>
+          <p class="panel-note">인원과 라운드만 정하면 바로 시작할 수 있습니다.</p>
+          <div class="grid host-config-grid">
+            <label>참가 슬롯
+              <select id="totalSlots">
+                <option>2</option>
+                <option>3</option>
+                <option>4</option>
+              </select>
+            </label>
+            <label>총 라운드
+              <input id="totalRounds" type="number" min="10" max="300" value="10">
+            </label>
+          </div>
+          <div class="advanced-settings" hidden aria-hidden="true">
+            <label>턴 제한
+              <select id="turnLimit">
+                <option value="15">15초</option>
+                <option value="30" selected>30초</option>
+                <option value="45">45초</option>
+                <option value="60">60초</option>
+                <option value="75">75초</option>
+                <option value="90">90초</option>
+                <option value="unlimited">무제한</option>
+              </select>
+            </label>
+            <label>봇 지연
+              <select id="botDelay">
+                <option value="0">즉시</option>
+                <option value="0.5">0.5초</option>
+                <option value="1" selected>1초</option>
+                <option value="2">2초</option>
+              </select>
+            </label>
+            <label class="inline"><input id="fastSimulation" type="checkbox"> 애니메이션 생략</label>
+          </div>
+          <div id="slots" class="slots"></div>
+          <div class="actions">
+            <button id="saveConfig">설정 적용</button>
+            <button id="startGame">시작</button>
+            <button id="pauseGame">일시중지</button>
+            <button id="resumeGame">재개</button>
+            <button id="endHosting" class="danger-action">서버 끝내기</button>
+          </div>
+        </section>
+
+        <section class="panel bot-dashboard advanced-panel" hidden aria-hidden="true">
+          <h2>봇 시뮬레이션</h2>
+          <div class="grid sim-grid">
+            <label>Seed <input id="simSeed" type="number" value="7"></label>
+            <label>반복 <input id="simRuns" type="number" min="1" max="1000" value="10"></label>
+            <label>이벤트 <select id="simEvents"><option value="true">활성</option><option value="false">비활성</option></select></label>
+            <label>빈도 <input id="simFrequency" type="number" min="0" value="2"></label>
+          </div>
+          <div class="actions">
+            <button id="quick10">빠른 10라운드</button>
+            <button id="quick30">표준 30라운드</button>
+            <button id="quick100">장기 100라운드</button>
+            <button id="runSimulation">빠른 실행</button>
+            <button id="stopSimulation">중단</button>
+          </div>
+          <div id="simProgress" class="sim-progress">대기 중</div>
+          <div class="actions">
+            <a class="download-link" href="/api/export/csv">CSV</a>
+            <a class="download-link" href="/api/export/json">JSON</a>
+          </div>
+          <div id="botMetrics" class="metric-list"></div>
+        </section>
+
+        <section class="panel public-panel">
+          <h2>순위와 경제 지표</h2>
+          <div id="rankings"></div>
+          <div id="economyIndicators"></div>
+          <div id="activeEvents"></div>
+        </section>
+      </aside>
+
+      <section class="host-log panel">
+        <details>
+          <summary>게임 로그</summary>
+          <pre id="stateView"></pre>
+        </details>
+      </section>
+
+      {% if debug_tools %}
+      <section class="panel debug-tools advanced-panel" hidden aria-hidden="true">
+        <h2>개발 제어</h2>
+        <div class="actions">
+          <button data-dev="force-end-turn">턴 강제 종료</button>
+          <button data-dev="bot-auto-start">봇 자동 시작</button>
+          <button data-dev="bot-auto-stop">봇 자동 정지</button>
+          <button data-dev="run-all-bot-max-speed">전체 봇 최대 속도</button>
+        </div>
+        <div class="grid">
+          <label>주사위 1회 <input id="forcedDice" type="number" min="1" max="6" value="1"></label>
+          <button data-dev="force-dice">지정</button>
+          <label>플레이어 ID <input id="targetPlayerId"></label>
+          <label>위치 <input id="targetPosition" type="number" min="0" max="39" value="0"></label>
+          <button data-dev="set-position">위치 변경</button>
+          <label>현금 <input id="targetCash" type="number" value="10000000"></label>
+          <button data-dev="set-cash">현금 지정</button>
+          <label>산업 수익률 bps <input id="industrialRateBps" type="number" value="1200"></label>
+          <button data-dev="set-industrial-rate">산업 수익률 지정</button>
+          <label>세율 bps <input id="targetTaxRateBps" type="number" value="0"></label>
+          <button data-dev="set-tax-rate">세율 지정</button>
+          <label>대출 원금 <input id="loanPrincipal" type="number" value="1000000"></label>
+          <button data-dev="create-loan">대출 생성</button>
+          <button data-dev="settle-start">출발지 정산</button>
+          <label>N바퀴 <input id="lapCount" type="number" min="1" value="1"></label>
+          <button data-dev="run-laps">N바퀴 진행</button>
+          <button data-dev="bot-summary">봇 경제 요약</button>
+          <label>지역 ID <input id="targetRegionId" value="gimcheon"></label>
+          <button data-dev="create-land">토지 소유 생성</button>
+          <label>건물
+            <select id="targetBuildingType">
+              <option value="residential">주거</option>
+              <option value="commercial">상업</option>
+              <option value="industrial">산업</option>
+              <option value="mixed_use">복합</option>
+            </select>
+          </label>
+          <button data-dev="create-building">건물 즉시 생성</button>
+          <button data-dev="sell-building">건물 매각</button>
+          <label>건물 ID <input id="targetBuildingId"></label>
+          <label>특수지역 ID <input id="targetSpecialId" value="pyeongchang"></label>
+          <label>외부 방문 횟수 <input id="specialVisits" type="number" min="0" value="1"></label>
+          <button data-dev="set-special-visits">특수 방문 지정</button>
+          <label>강제매각 주사위 <input id="specialSaleDice" type="number" min="1" max="6" value="5"></label>
+          <button data-dev="force-special-sale-dice">강제매각 주사위</button>
+          <label>거래 상대 ID <input id="tradeBuyerId"></label>
+          <button data-dev="run-bot-land-trade">봇 토지 거래</button>
+          <label>봇 전략
+            <select id="targetBotStrategy">
+              <option value="balanced">balanced</option>
+              <option value="aggressive">aggressive</option>
+              <option value="conservative">conservative</option>
+              <option value="random">random</option>
+            </select>
+          </label>
+          <button data-dev="change-bot-strategy">봇 전략 변경</button>
+          <label>N턴 <input id="nextTurns" type="number" min="1" value="1"></label>
+          <button data-dev="run-next-turns">다음 N턴 실행</button>
+          <label>라운드 <input id="fastRounds" type="number" min="1" value="1"></label>
+          <button data-dev="fast-forward-rounds">빠른 진행</button>
+        </div>
+      </section>
+      {% endif %}
+    </main>
+    <script src="{{ url_for('static', filename='js/common.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/host.js') }}"></script>
+  </body>
+</html>

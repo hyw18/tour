@@ -1,0 +1,6 @@
+[
+  {"id": "pyeongchang", "name": "평창", "initial_price": 2000000},
+  {"id": "yeosu", "name": "여수", "initial_price": 3000000},
+  {"id": "sejong", "name": "세종", "initial_price": 5000000},
+  {"id": "seoul", "name": "서울", "initial_price": 10000000}
+]

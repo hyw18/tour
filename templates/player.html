@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>경제 보드게임 플레이어</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  </head>
+  <body class="player-screen">
+    <div class="portrait-warning">
+      <strong>가로 모드로 전환</strong>
+      <span>현재 연결과 게임 상태는 유지됩니다.</span>
+    </div>
+
+    <main class="player-table landscape-game" aria-live="polite">
+      <header class="player-topbar">
+        <form id="joinForm" class="join-form">
+          <input id="nickname" placeholder="닉네임" autocomplete="nickname">
+          <button>입장</button>
+        </form>
+        <div id="playerBadge" class="badge">입장 전</div>
+        <div id="turnTitle" class="turn-title">대기 중</div>
+      </header>
+
+      <section class="player-layout">
+        <section class="board-zone">
+          <div class="table-rail">
+            <div id="boardGrid" class="board-grid" aria-label="40칸 보드"></div>
+            <div id="zoomCell" class="zoom-cell"></div>
+          </div>
+        </section>
+
+        <section class="info-zone">
+          <div class="tab-strip" aria-label="상세 정보">
+            <button class="tab-pill active" data-info-tab="arrival">칸</button>
+            <button class="tab-pill" data-info-tab="events">이벤트</button>
+            <button class="tab-pill" data-info-tab="settlement">정산</button>
+          </div>
+          <article id="arrivalPanel" class="dealer-card info-panel"></article>
+          <article id="eventPanel" class="dealer-card info-panel compact-hidden"></article>
+          <article id="settlementPanel" class="dealer-card info-panel compact-hidden"></article>
+        </section>
+
+        <aside class="command-zone">
+          <div id="playerState" class="meter-stack"></div>
+          <div class="dice-dock">
+            <button id="rollDice" class="primary-action">주사위</button>
+            <button id="endTurn" class="primary-action ruby">턴 종료</button>
+          </div>
+          <div class="actions command-grid">
+            <button id="purchaseLand">토지 구매</button>
+            <button id="declineAction">포기</button>
+            <select id="buildingType">
+              <option value="residential">주거</option>
+              <option value="commercial">상업</option>
+              <option value="industrial">산업</option>
+              <option value="mixed_use">복합</option>
+            </select>
+            <button id="build">건설</button>
+            <button id="manageAction" hidden aria-hidden="true">관리</button>
+            <button id="tradeAction" hidden aria-hidden="true">거래</button>
+          </div>
+        </aside>
+      </section>
+
+      <div id="tradeModal" class="trade-modal" hidden></div>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/common.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/player.js') }}"></script>
+  </body>
+</html>

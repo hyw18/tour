@@ -1,0 +1,22 @@
+{
+  "balanced": {
+    "description": "수익과 안정의 균형을 선호합니다.",
+    "difficulty": "normal",
+    "risk_tolerance": 50
+  },
+  "aggressive": {
+    "description": "상업과 복합 투자 성향이 높습니다.",
+    "difficulty": "normal",
+    "risk_tolerance": 85
+  },
+  "conservative": {
+    "description": "현금 보유, 주거, 산업을 선호합니다.",
+    "difficulty": "normal",
+    "risk_tolerance": 25
+  },
+  "random": {
+    "description": "유효 행동 중 무작위로 선택합니다.",
+    "difficulty": "normal",
+    "risk_tolerance": 50
+  }
+}
