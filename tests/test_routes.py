@@ -106,8 +106,10 @@ def test_join_idempotency_and_server_state(client):
         "bot_strategies": ["balanced", "balanced"],
     }, "cfg")
     first = post(client, "/api/join", {"nickname": "Alice"}, "join-key").get_json()
-    second = post(client, "/api/join", {"nickname": "Bob"}, "join-key").get_json()
-    assert first == second
+    assert first["nickname"] == "Alice"
+    second_response = post(client, "/api/join", {"nickname": "Bob"}, "join-key")
+    assert second_response.status_code == 409
+    assert "different payload" in second_response.get_json()["error"]
     state = client.get("/api/state").get_json()
     assert len([player for player in state["players"] if not player["is_bot"]]) == 1
 
@@ -193,7 +195,9 @@ def test_operating_right_routes_are_idempotent_and_server_validated(monkeypatch)
         "building_id": building_id,
         "price_won": 999999,
     }, "offer")
-    assert first.get_json() == second.get_json()
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert "different payload" in second.get_json()["error"]
 
 
 def test_event_trigger_and_report_routes(monkeypatch):
@@ -287,6 +291,8 @@ def test_public_private_host_security_and_exports(monkeypatch):
     assert "loan" in private.get_json()
     host_state = client.get("/api/host/state")
     assert "loans" not in host_state.get_json()
+    assert "game_log" in host_state.get_json()
+    assert "game_log" not in public_state
     assert "loans" in client.get("/api/dev/state").get_json()
     csv_response = client.get("/api/export/csv")
     assert csv_response.status_code == 200

@@ -314,7 +314,8 @@ def test_bot_investment_uses_same_cash_and_position_rules():
     state = engine.take_turn_for_player(bot.id, source="bot")
     bot_state = next(player for player in state["players"] if player["id"] == bot.id)
     assert "gimcheon" in bot_state["lands"]
-    assert bot_state["cash_won"] == 9_300_000
+    assert bot_state["cash_won"] == 7_400_000
+    assert len(bot_state["buildings"]) == 1
 
 
 def test_bot_strategy_build_preferences_and_cash_reserve():
@@ -605,8 +606,8 @@ def test_land_trade_fixed_price_timeout_acceptance_and_rights_constraints():
     engine.create_building(buyer["id"], "gimcheon", "residential")
     engine.state.buildings[0]["ownership_chain"] = [buyer["id"], seller["id"]]
     engine.set_player_position(buyer["id"], 1)
-    with pytest.raises(GameRuleError, match="split"):
-        engine.propose_land_trade(buyer["id"], seller["id"], "gimcheon")
+    state = engine.propose_land_trade(buyer["id"], seller["id"], "gimcheon")
+    assert state["land_trade_offer"]["buyer_id"] == seller["id"]
 
 
 def test_land_trade_auto_rejects_after_timeout_and_bot_responds_immediately():
@@ -951,7 +952,7 @@ def test_bankruptcy_a_takeover_success_requires_land_price_payment():
     assert engine.state.land_ownership["gimcheon"] == d["id"]
     assert engine._find_player(d["id"]).cash_won == before - 700_000
     assert engine.state.buildings[0]["nominal_owner_id"] == d["id"]
-    assert engine.state.buildings[0]["ownership_chain"] == [d["id"]]
+    assert engine.state.buildings[0]["ownership_chain"] == [d["id"], b["id"], c["id"]]
 
 
 def test_bankruptcy_a_takeover_decline_removes_buildings_and_refunds_bottom_operator():

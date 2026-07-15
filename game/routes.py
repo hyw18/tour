@@ -1,9 +1,10 @@
+import json
 import os
 from functools import wraps
 
 from flask import Blueprint, Response, abort, current_app, jsonify, render_template, request, session
 
-from .engine import GameRuleError
+from .engine import GameRuleError, IdempotencyConflict
 
 
 bp = Blueprint("game", __name__)
@@ -56,22 +57,39 @@ def mutating_route(handler=None, *, allow_ended=False):
             key = request.headers.get("Idempotency-Key")
             try:
                 scoped_key = f"{request.path}:{key}" if key else key
+                payload = request.get_json(silent=True)
+                signature = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 def execute():
                     if engine().state.ended and not allow_ended:
                         raise PhaseConflict("current phase does not allow this action")
-                    return route_handler(*args, **kwargs)
+                    result = route_handler(*args, **kwargs)
+                    record_authenticated_activity(payload)
+                    return result
 
-                return jsonify(engine().with_idempotency(scoped_key, execute))
+                return jsonify(engine().with_idempotency(scoped_key, execute, signature))
             except PermissionDenied as exc:
                 return json_error(str(exc), 403)
             except PhaseConflict as exc:
                 return json_error(str(exc), 409)
+            except IdempotencyConflict as exc:
+                return json_error(str(exc), 409)
             except GameRuleError as exc:
+                record_authenticated_activity(payload)
                 return json_error(str(exc))
 
         return wrapper
 
     return decorator(handler) if handler else decorator
+
+
+def record_authenticated_activity(payload):
+    if not isinstance(payload, dict):
+        return
+    player_id = payload.get("player_id") or payload.get("requester_id") or payload.get("approver_id") or payload.get("responder_id")
+    if player_id and player_id in session.get("player_ids", []):
+        player = engine()._find_player(player_id)
+        if player:
+            engine()._record_activity(player)
 
 
 @bp.errorhandler(GameRuleError)
@@ -187,14 +205,10 @@ def api_resume():
 
 
 @bp.post("/api/host/end")
+@mutating_route(allow_ended=True)
 def api_host_end():
     require_host()
-    key = request.headers.get("Idempotency-Key")
-    try:
-        scoped_key = f"{request.path}:{key}" if key else key
-        return jsonify(engine().with_idempotency(scoped_key, lambda: engine().close_hosting()))
-    except GameRuleError as exc:
-        return json_error(str(exc))
+    return engine().close_hosting()
 
 
 @bp.post("/api/host/finish")
@@ -360,6 +374,15 @@ def api_revive():
     return views().public()
 
 
+@bp.post("/api/event/acknowledge")
+@mutating_route
+def api_event_acknowledge():
+    payload = request.get_json(force=True, silent=True) or {}
+    player_id = payload.get("player_id")
+    require_player(player_id)
+    return engine().record_player_activity(player_id)
+
+
 @bp.post("/api/event/trigger")
 @mutating_route
 def api_event_trigger():
@@ -371,6 +394,15 @@ def api_event_trigger():
         payload.get("region_id"),
         payload.get("source", "manual"),
     )
+
+
+@bp.post("/api/bankruptcy/takeover/respond")
+@mutating_route
+def api_bankruptcy_takeover_respond():
+    payload = request.get_json(force=True, silent=True) or {}
+    player_id = payload.get("player_id")
+    require_player(player_id)
+    return engine().respond_land_takeover(player_id, boolean_field(payload, "accept"))
 
 
 @bp.get("/api/report/<player_id>")

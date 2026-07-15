@@ -285,3 +285,6 @@ def test_host_frontend_uses_one_phase_control_reducer_and_preserves_slot_values(
     assert "const currentTypes" in source
     assert 'if (configDirty) { showError("설정을 먼저 적용하세요")' in source
     assert 'document.querySelector("#hostConfigPanel").addEventListener' in source
+    assert 'document.querySelector("#saveConfig").disabled = !editable;' in source
+    assert 'addEventListener("change", handleConfigFormChange)' in source
+    assert 'if (event.target.matches("#totalSlots")) renderSlots();' in source

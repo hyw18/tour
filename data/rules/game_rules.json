@@ -1,6 +1,6 @@
 {
-  "rules_version": "2026.07.15.1",
-  "effective_date": "2026-07-15",
+  "rules_version": "2026.07.16.1",
+  "effective_date": "2026-07-16",
   "status": "official_with_unresolved_items",
   "authority_order": [
     "data/rules/game_rules.json",
@@ -111,11 +111,13 @@
     {"id":"MOVE-001","section":"B","title":"출발지 이동","requirement":"출발지 도달·통과 시 강제 정지하고 남은 이동을 버린 뒤 즉시 정산한다."},
     {"id":"LAND-001","section":"C","title":"고정 토지가","requirement":"25개 일반지역 토지가는 land_prices_won의 고정 원 단위 값이며 이벤트로 변경할 수 없다."},
     {"id":"LAND-002","section":"C","title":"토지 구매","requirement":"무주지 도착 시 선택 구매하며 현금 부족 또는 음수이면 구매할 수 없다."},
+    {"id":"LAND-003","section":"C","title":"토지 구매와 건물 편집 분리","requirement":"토지 구매는 자산 취득 행동이며 해당 방문의 건물 편집 기회를 소비하지 않는다."},
     {"id":"BUILD-001","section":"D","title":"건물 가격","requirement":"지역별 토지·주거·상업·산업·복합 가격은 building_prices_won을 따른다."},
     {"id":"BUILD-002","section":"D","title":"건설 위치","requirement":"본인 토지에 정확히 도착해야 건설할 수 있다."},
     {"id":"BUILD-003","section":"D","title":"방문 편집 횟수","requirement":"한 방문에 성공한 건물 편집은 1회이며 실패는 소비하지 않는다."},
     {"id":"BUILD-004","section":"D","title":"건물 수 제한","requirement":"주거·상업은 무제한, 산업·복합은 지역당 각각 최대 1채다."},
     {"id":"BUILD-005","section":"D","title":"초기 시세와 명목 소유","requirement":"초기 시세는 건설비이며 토지 소유자와 건물 명목 소유자는 항상 같다."},
+    {"id":"BUILD-006","section":"D","title":"구매 직후 선택 건설","requirement":"무주 일반지역을 구매한 플레이어는 같은 방문에서 별도 결제로 건물 1채를 선택 건설하거나 건설하지 않을 수 있으며 성공한 건설만 방문 편집 기회를 소비한다."},
     {"id":"MONEY-001","section":"E","title":"정수 금액","requirement":"모든 금액은 원 단위 정수이며 float 계산을 금지한다."},
     {"id":"MONEY-002","section":"E","title":"반올림","requirement":"모든 배율 적용 뒤 마지막에만 50,000원 단위 ROUND_HALF_UP으로 반올림한다."},
     {"id":"FEE-001","section":"F","title":"토지 방문비","requirement":"상업·복합이 없으면 고정 토지가 5%를 토지 소유자에게 지급한다."},

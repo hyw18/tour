@@ -168,7 +168,10 @@ function updateControlsForPhase(state) {
     const type = element.closest(".slot-row")?.querySelector("[data-slot-type]")?.value;
     element.disabled = !editable || type !== "bot";
   });
-  document.querySelector("#saveConfig").disabled = !editable || !configDirty;
+  // Keep explicit apply available throughout setup/lobby. Select controls do
+  // not consistently emit `input` in every browser, and re-applying the
+  // current values is a safe way to recover the lobby configuration.
+  document.querySelector("#saveConfig").disabled = !editable;
   document.querySelector("#startGame").disabled = requestInFlight || !["setup", "lobby"].includes(phase) || configDirty || !allSlotsReady;
   document.querySelector("#startGame").title = !allSlotsReady ? "모든 참가 슬롯이 준비되어야 시작할 수 있습니다" : "";
   document.querySelector("#pauseGame").disabled = requestInFlight || phase !== "active";
@@ -381,15 +384,17 @@ async function refresh(forceConfig = false) {
   renderStep("simulation", () => renderBotMetrics(state.simulation_results));
 }
 
-document.querySelector("#totalSlots").addEventListener("change", () => renderSlots());
 document.querySelector("#viewResults").addEventListener("click", () => {
   document.querySelector("#resultsPanel").scrollIntoView({ behavior: "smooth", block: "start" });
 });
-document.querySelector("#hostConfigPanel").addEventListener("input", (event) => {
+function handleConfigFormChange(event) {
   if (!event.target.matches("button")) {
+    if (event.target.matches("#totalSlots")) renderSlots();
     updateDirtyFromForm();
   }
-});
+}
+document.querySelector("#hostConfigPanel").addEventListener("input", handleConfigFormChange);
+document.querySelector("#hostConfigPanel").addEventListener("change", handleConfigFormChange);
 
 async function runControl(buttonId, operation, successMessage) {
   if (requestInFlight) return;

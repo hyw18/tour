@@ -51,14 +51,14 @@ def test_official_rules_schema_version_authority_and_unique_ids():
     rules = official_rules()
     validate(rules, json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
     ids = [item["id"] for item in rules["rules"]]
-    assert rules["rules_version"] == "2026.07.15.1"
+    assert rules["rules_version"] == "2026.07.16.1"
     assert rules["authority_order"] == [
         "data/rules/game_rules.json",
         "docs/GAME_RULES.md",
         "code",
         "tests",
     ]
-    assert len(ids) == len(set(ids)) == 104
+    assert len(ids) == len(set(ids)) == 106
     assert all(RULE_ID_PATTERN.fullmatch(rule_id) for rule_id in ids)
     assert {item["rule_id"] for item in rules["unresolved"]} == {
         "TAX-005",
@@ -161,7 +161,6 @@ def test_official_start_settlement_order_and_loan_limit_boundary():
     assert engine.state.loans[human["id"]]["principal_won"] == MAX_EMERGENCY_LOAN_PRINCIPAL_WON == 20_000_000
 
 
-@pytest.mark.xfail(strict=True, reason="CONFLICT LOAN-003: current code waits past the third start")
 def test_official_loan_maturity_rejects_one_won_at_exact_third_start():
     engine, human = configured_engine()
     engine.create_loan(human["id"], 1)
@@ -172,7 +171,6 @@ def test_official_loan_maturity_rejects_one_won_at_exact_third_start():
     assert engine._find_player(human["id"]).status == "bankrupt"
 
 
-@pytest.mark.xfail(strict=True, reason="CONFLICT RIGHTS-001: duplicate chain members are currently accepted")
 def test_official_operating_right_chain_rejects_duplicate_members():
     engine, owner = configured_engine()
     other = next(player for player in engine.state.players if player.id != owner["id"])
@@ -183,7 +181,6 @@ def test_official_operating_right_chain_rejects_duplicate_members():
         engine.create_ownership_chain(building_id, [owner["id"], other.id, other.id])
 
 
-@pytest.mark.xfail(strict=True, reason="CONFLICT EVENT-006: event multipliers round at intermediate steps")
 def test_official_event_multipliers_round_only_once_after_full_composition():
     engine, human = configured_engine()
     engine.create_building(human["id"], "gimcheon", "commercial")
@@ -196,7 +193,6 @@ def test_official_event_multipliers_round_only_once_after_full_composition():
     assert engine.adjusted_building_value(building) == 50_000
 
 
-@pytest.mark.xfail(strict=True, reason="CONFLICT REVIVE-002: current code permits an exact 15-round gap")
 def test_official_revival_rejects_exact_fifteen_round_bankruptcy_gap():
     engine = GameEngine(ROOT / "data")
     engine.configure({

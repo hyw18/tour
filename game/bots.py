@@ -43,7 +43,7 @@ class BotStrategy:
             "balanced": ("residential", "commercial", "industrial", "mixed_use"),
         }
         if self.name == "random":
-            return choice(affordable)
+            return choice([*affordable, None])
         return next((item for item in preferences.get(self.name, preferences["balanced"]) if item in affordable), None)
 
     def accepts_land_trade(self, price, has_loan=False):
@@ -109,30 +109,35 @@ class BotController:
         return {"type": "decline"}
 
     def perform_investment(self, player):
-        pending = self.engine.state.pending_action
-        if not pending or pending.get("player_id") != player.id:
+        # A land purchase can create one follow-up build decision. The guard
+        # prevents malformed pending state from turning this into an action loop.
+        for _ in range(2):
+            pending = self.engine.state.pending_action
+            if not pending or pending.get("player_id") != player.id:
+                return
+            self.engine._log_bot_decision(
+                player,
+                f"pending={pending['type']} cash={player.cash_won} tax={self.engine._calculate_tax_rate_bps(player)} loan={bool(self.engine.state.loans.get(player.id))}",
+            )
+            if player.cash_won < 0:
+                self.engine._log_bot_decision(player, "skip investment: negative cash")
+                self.engine.decline_pending_action(player.id)
+                return
+            action = self.choose_action(player)
+            if action["type"] == "purchase_land":
+                self.engine._log_bot_decision(player, f"buy land expected_fee={apply_rate_rounded_50k(pending['price_won'], 5, 100)} price={pending['price_won']}")
+                self.engine.purchase_land(player.id)
+                continue
+            if action["type"] == "build":
+                self.engine._log_bot_decision(player, f"build {action['building_type']} cost={self.engine.data['building_prices'][pending['region_id']][action['building_type']]}")
+                self.engine.build_on_land(player.id, action["building_type"])
+            elif action["type"] == "purchase_special":
+                self.engine._log_bot_decision(player, f"buy special {pending['special_region_id']} price={pending['price_won']}")
+                self.engine.purchase_special_region(player.id)
+            else:
+                self.engine._log_bot_decision(player, f"skip {pending['type']}: strategy declined")
+                self.engine.decline_pending_action(player.id)
             return
-        self.engine._log_bot_decision(
-            player,
-            f"pending={pending['type']} cash={player.cash_won} tax={self.engine._calculate_tax_rate_bps(player)} loan={bool(self.engine.state.loans.get(player.id))}",
-        )
-        if player.cash_won < 0:
-            self.engine._log_bot_decision(player, "skip investment: negative cash")
-            self.engine.decline_pending_action(player.id)
-            return
-        action = self.choose_action(player)
-        if action["type"] == "purchase_land":
-            self.engine._log_bot_decision(player, f"buy land expected_fee={apply_rate_rounded_50k(pending['price_won'], 5, 100)} price={pending['price_won']}")
-            self.engine.purchase_land(player.id)
-        elif action["type"] == "build":
-            self.engine._log_bot_decision(player, f"build {action['building_type']} cost={self.engine.data['building_prices'][pending['region_id']][action['building_type']]}")
-            self.engine.build_on_land(player.id, action["building_type"])
-        elif action["type"] == "purchase_special":
-            self.engine._log_bot_decision(player, f"buy special {pending['special_region_id']} price={pending['price_won']}")
-            self.engine.purchase_special_region(player.id)
-        else:
-            self.engine._log_bot_decision(player, f"skip {pending['type']}: strategy declined")
-            self.engine.decline_pending_action(player.id)
 
     def consider_asset_disposal(self, player):
         if player.cash_won >= 0 and not self.engine.state.loans.get(player.id):

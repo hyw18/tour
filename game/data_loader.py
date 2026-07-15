@@ -217,6 +217,10 @@ class GameDataLoader:
                     raise DataValidationError(f"{filename}[{index}].effects[{effect_index}].operation: unsupported")
                 if not isinstance(effect.get("value_bps"), int):
                     raise DataValidationError(f"{filename}[{index}].effects[{effect_index}].value_bps: integer required")
+            if not isinstance(item["duration_rounds"], int) or item["duration_rounds"] <= 0:
+                raise DataValidationError(f"{filename}[{index}].duration_rounds: positive integer required")
+            if not isinstance(item["recovery_rounds"], int) or item["recovery_rounds"] < 0:
+                raise DataValidationError(f"{filename}[{index}].recovery_rounds: non-negative integer required")
         if scope_counts["personal"] < 6 or scope_counts["regional"] < 7 or scope_counts["nationwide"] < 7:
             raise DataValidationError(f"{filename}: requires personal>=6 regional>=7 nationwide>=7")
 
@@ -252,11 +256,58 @@ class GameDataLoader:
             raise DataValidationError("board.json: region cells must follow regions.json order")
         special_ids = {item["id"] for item in loaded["special_regions"]}
         event_ids = {item["id"] for item in loaded["events"]}
+        industry_ids = {item["id"] for item in loaded["industries"]}
         for index, cell in enumerate(loaded["board"]):
             if cell["type"] == "special" and cell.get("special_region_id") not in special_ids:
                 raise DataValidationError(f"board.json[{index}].special_region_id: unknown special region")
             if cell["type"] == "event" and cell.get("event_id") not in event_ids:
                 raise DataValidationError(f"board.json[{index}].event_id: unknown event")
+        self._validate_event_references(loaded["events"], set(regions), industry_ids, event_ids)
+
+    def _validate_event_references(self, events, region_ids, industry_ids, event_ids):
+        graph = {}
+        for index, event in enumerate(events):
+            referenced_regions = set(event.get("region_ids", []))
+            if event.get("region_id"):
+                referenced_regions.add(event["region_id"])
+            referenced_industries = set(event.get("industry_ids", []))
+            if event.get("industry_id"):
+                referenced_industries.add(event["industry_id"])
+            for effect in event["effects"]:
+                if effect.get("region_id"):
+                    referenced_regions.add(effect["region_id"])
+                if effect.get("industry_id"):
+                    referenced_industries.add(effect["industry_id"])
+            unknown_regions = referenced_regions - region_ids
+            unknown_industries = referenced_industries - industry_ids
+            if unknown_regions:
+                raise DataValidationError(f"events.json[{index}]: unknown region ids {sorted(unknown_regions)}")
+            if unknown_industries:
+                raise DataValidationError(f"events.json[{index}]: unknown industry ids {sorted(unknown_industries)}")
+            chained = set(event.get("chained_event_pool", []))
+            unknown_events = chained - event_ids
+            if unknown_events:
+                raise DataValidationError(f"events.json[{index}]: unknown chained event ids {sorted(unknown_events)}")
+            if event["id"] in chained:
+                raise DataValidationError(f"events.json[{index}]: event cannot chain to itself")
+            graph[event["id"]] = chained
+
+        visiting = set()
+        visited = set()
+
+        def visit(event_id):
+            if event_id in visiting:
+                raise DataValidationError(f"events.json: chained event cycle detected at {event_id}")
+            if event_id in visited:
+                return
+            visiting.add(event_id)
+            for next_id in graph[event_id]:
+                visit(next_id)
+            visiting.remove(event_id)
+            visited.add(event_id)
+
+        for event_id in graph:
+            visit(event_id)
 
     def _validate_official_cross_file_rules(self, loaded):
         official = loaded["official_rules"]

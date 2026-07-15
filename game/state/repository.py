@@ -18,14 +18,19 @@ class StateRepository:
         with self.lock:
             return operation()
 
-    def idempotent(self, key, operation, error_type):
+    def idempotent(self, key, operation, error_type, signature=None, conflict_type=None):
         with self.lock:
             if not key:
                 raise error_type("Idempotency-Key header is required")
             if key in self.state.processed_keys:
-                return deepcopy(self.state.processed_keys[key])
+                stored = self.state.processed_keys[key]
+                if isinstance(stored, dict) and "result" in stored and "signature" in stored:
+                    if stored["signature"] != signature:
+                        raise (conflict_type or error_type)("Idempotency-Key was already used with a different payload")
+                    return deepcopy(stored["result"])
+                return deepcopy(stored)
             result = operation()
-            self.state.processed_keys[key] = deepcopy(result)
+            self.state.processed_keys[key] = {"signature": signature, "result": deepcopy(result)}
             while len(self.state.processed_keys) > self.max_processed_keys:
                 self.state.processed_keys.pop(next(iter(self.state.processed_keys)))
             return result

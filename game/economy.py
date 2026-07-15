@@ -23,3 +23,9 @@ def round_to_50k(amount_won):
     amount = Decimal(to_won(amount_won))
     unit = Decimal(WON_ROUNDING_UNIT)
     return int((amount / unit).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * unit)
+
+
+def round_fraction_to_50k(numerator, denominator=1):
+    amount = Decimal(int(numerator)) / Decimal(int(denominator))
+    unit = Decimal(WON_ROUNDING_UNIT)
+    return int((amount / unit).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * unit)

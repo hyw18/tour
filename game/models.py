@@ -89,10 +89,12 @@ class GameState:
     current_turn_index: int = 0
     global_round: int = 1
     paused: bool = False
+    pause_started_at: float | None = None
     ended: bool = False
     turn_started_at: float | None = None
     turn_elapsed_before_pause: float = 0
     turn_has_rolled: bool = False
+    turn_sequence: int = 0
     last_dice: int | None = None
     last_activity_player_id: str | None = None
     processed_keys: dict[str, dict] = field(default_factory=dict)
@@ -101,6 +103,7 @@ class GameState:
     land_ownership: dict = field(default_factory=dict)
     buildings: list = field(default_factory=list)
     pending_action: dict | None = None
+    land_purchased_this_visit: bool = False
     successful_build_edit_this_visit: bool = False
     industrial_return_rate_bps: int = 1200
     industrial_return_explicit_override: bool = False
@@ -110,6 +113,7 @@ class GameState:
     tax_rate_overrides: dict = field(default_factory=dict)
     loans: dict = field(default_factory=dict)
     last_settlement: dict | None = None
+    settlement_results: dict = field(default_factory=dict)
     bot_debug_log: list = field(default_factory=list)
     pending_commercial_sale_refunds: list = field(default_factory=list)
     special_ownership: dict = field(default_factory=dict)
@@ -134,6 +138,7 @@ class GameState:
     no_action_counts: dict = field(default_factory=dict)
     rankings: dict = field(default_factory=dict)
     pending_land_takeover: dict | None = None
+    pending_land_takeover_queue: list = field(default_factory=list)
     forced_takeover_decisions: dict = field(default_factory=dict)
     game_log: list = field(default_factory=list)
     asset_history: dict = field(default_factory=dict)
@@ -147,10 +152,12 @@ class GameState:
         self.current_turn_index = 0
         self.global_round = 1
         self.paused = False
+        self.pause_started_at = None
         self.ended = False
         self.turn_started_at = None
         self.turn_elapsed_before_pause = 0
         self.turn_has_rolled = False
+        self.turn_sequence = 0
         self.last_dice = None
         self.last_activity_player_id = None
         self.processed_keys.clear()
@@ -159,6 +166,7 @@ class GameState:
         self.land_ownership.clear()
         self.buildings.clear()
         self.pending_action = None
+        self.land_purchased_this_visit = False
         self.successful_build_edit_this_visit = False
         self.industrial_return_rate_bps = 1200
         self.industrial_return_explicit_override = False
@@ -168,6 +176,7 @@ class GameState:
         self.tax_rate_overrides.clear()
         self.loans.clear()
         self.last_settlement = None
+        self.settlement_results.clear()
         self.bot_debug_log.clear()
         self.pending_commercial_sale_refunds.clear()
         self.special_ownership.clear()
@@ -192,6 +201,7 @@ class GameState:
         self.no_action_counts.clear()
         self.rankings.clear()
         self.pending_land_takeover = None
+        self.pending_land_takeover_queue.clear()
         self.forced_takeover_decisions.clear()
         self.game_log.clear()
         self.asset_history.clear()

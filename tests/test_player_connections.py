@@ -33,6 +33,7 @@ def test_player_page_contains_assets_management_and_request_controls():
         assert f'id="{element_id}"' in html
     assert 'id="manageAction" hidden' not in html
     assert 'id="tradeAction" hidden' not in html
+    assert "규칙 결정 대기" in html
 
 
 def test_player_javascript_connects_every_existing_player_mutation_and_deduplicates_clicks():
@@ -52,6 +53,8 @@ def test_player_javascript_connects_every_existing_player_mutation_and_deduplica
         "/api/usage-change/respond",
         "/api/operating-right/recall",
         "/api/revive",
+        "/api/event/acknowledge",
+        "/api/bankruptcy/takeover/respond",
     ):
         assert endpoint in source
     assert "if (actionInFlight) return;" in source
@@ -59,6 +62,10 @@ def test_player_javascript_connects_every_existing_player_mutation_and_deduplica
     assert "special.initial_price_won" in source
     assert "state.special_region_details" in source
     assert "currentSpecial" not in source
+    assert "privateData?.pending_action" in source
+    assert "토지 구매는 건물 행동을 소비하지 않습니다." in source
+    assert "토지 구매 포기" in source
+    assert "이번 방문 건설하지 않기" in source
 
 
 def test_private_state_has_server_allowed_actions_and_complete_asset_details():
@@ -138,8 +145,7 @@ def test_land_trade_is_visible_only_to_participants_and_acceptance_updates_state
         "offer",
     )
     assert proposed.status_code == 200
-    public_offer = seller_client.get("/api/state").get_json()["land_trade_offer"]
-    assert public_offer == {"active": True, "response_rule": "auto_reject", "timeout_seconds": 10, "type": "land_trade"}
+    assert "land_trade_offer" not in seller_client.get("/api/state").get_json()
 
     buyer_private = buyer_client.get(f"/api/player/{buyer['id']}/private", headers={"X-Player-Id": buyer["id"]}).get_json()
     assert buyer_private["related_requests"][0]["price_won"] == 700_000
