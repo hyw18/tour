@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from app import create_app
@@ -31,6 +33,47 @@ def test_host_and_player_pages_are_separate(client):
     player = client.get("/player")
     assert b"host.js" in host.data
     assert b"player.js" in player.data
+
+
+def test_host_dashboard_keeps_board_and_initialization_contract(client):
+    host = client.get("/host")
+    assert b'id="hostBoardGrid"' in host.data
+    assert b'id="boardStatus"' in host.data
+    assert b'id="serverStatus"' in host.data
+    assert b'id="hostingStatusText"' in host.data
+    source = (Path(client.application.static_folder) / "js/host.js").read_text()
+    assert "function renderHostBoard(state)" in source
+    assert "state.board.length !== 40" in source
+    assert "async function initializeHostPage()" in source
+    assert 'document.addEventListener("DOMContentLoaded", initializeHostPage' in source
+    assert "await initializeHostDashboard()" in source
+
+
+def test_host_lifecycle_preserves_real_board_for_twenty_cycles(client):
+    authenticate(client)
+    for cycle in range(20):
+        configured = post(client, "/api/config", {
+            "total_slots": 3,
+            "slot_types": ["bot", "bot", "bot"],
+            "bot_strategies": ["balanced", "aggressive", "conservative"],
+            "total_rounds": 10,
+        }, f"config-{cycle}")
+        assert configured.status_code == 200
+        setup = client.get("/api/host/state").get_json()
+        assert setup["server_status"] == "online"
+        assert setup["phase"] == "setup"
+        assert len(setup["board"]) == 40
+        assert post(client, "/api/start", key=f"start-{cycle}").status_code == 200
+        active = client.get("/api/host/state").get_json()
+        assert active["phase"] == "active"
+        assert len(active["board"]) == 40
+        assert post(client, "/api/pause", key=f"pause-{cycle}").status_code == 200
+        assert post(client, "/api/resume", key=f"resume-{cycle}").status_code == 200
+        assert post(client, "/api/host/finish", key=f"finish-{cycle}").status_code == 200
+        assert post(client, "/api/host/new-game", {"keep_config": True}, f"new-{cycle}").status_code == 200
+        prepared = client.get("/api/host/state").get_json()
+        assert prepared["phase"] == "setup"
+        assert len(prepared["board"]) == 40
 
 
 def test_host_only_start_pause_resume_and_config(client):

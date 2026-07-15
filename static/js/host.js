@@ -8,6 +8,7 @@ const hostPhase = document.querySelector("#hostPhase");
 const serverStatus = document.querySelector("#serverStatus");
 const botMetrics = document.querySelector("#botMetrics");
 const simProgress = document.querySelector("#simProgress");
+const boardStatus = document.querySelector("#boardStatus");
 
 let simulationRunning = false;
 let simulationJobId = null;
@@ -21,7 +22,7 @@ let savedConfig = null;
 function setHostAuthenticated(authenticated) {
   document.querySelector(".host-dashboard").dataset.authenticated = String(authenticated);
   document.querySelector("#hostAuthStatus").textContent = authenticated ? "호스트 인증 완료" : "호스트 인증이 필요합니다";
-  document.querySelectorAll(".host-board-panel, .host-side > section:not(#hostAuthPanel), .host-log, .debug-tools")
+  document.querySelectorAll(".authenticated-content, .debug-tools")
     .forEach((element) => { element.hidden = !authenticated; });
 }
 
@@ -78,12 +79,37 @@ function cellName(cell) {
 }
 
 async function getHostState() {
-  const response = await fetch("/api/host/state");
+  const url = "/api/host/state";
+  let response;
+  try {
+    response = await fetch("/api/host/state");
+  } catch (error) {
+    console.error("Host state request failed", { url, error });
+    setServerReachability(false);
+    throw new Error("서버에 연결할 수 없습니다");
+  }
   if (!response.ok) {
-    if ([400, 401, 403].includes(response.status)) throw new Error("host-auth-required");
+    const responseBody = await response.text();
+    console.error("Host state request failed", { url, status: response.status, response: responseBody });
+    if ([401, 403].includes(response.status)) throw new Error("host-auth-required");
     throw new Error("호스트 상태를 불러오지 못했습니다");
   }
-  return response.json();
+  const state = await response.json();
+  setServerReachability(true);
+  return state;
+}
+
+function setServerReachability(online) {
+  if (!serverStatus) return;
+  serverStatus.innerHTML = online ? '<i aria-hidden="true">●</i> ON' : '<i aria-hidden="true">●</i> OFF';
+  serverStatus.classList.toggle("on", online);
+  serverStatus.classList.toggle("off", !online);
+}
+
+function setBoardStatus(message, kind = "loading") {
+  if (!boardStatus) return;
+  boardStatus.textContent = message;
+  boardStatus.className = `board-status ${kind}`;
 }
 
 function renderSlots(slotTypes, strategies) {
@@ -108,6 +134,7 @@ function renderSlots(slotTypes, strategies) {
         <option value="conservative">conservative</option>
         <option value="random">random</option>
       </select>
+      <span class="slot-status">✓ 준비</span>
     `;
     slotsEl.append(row);
     row.querySelector("[data-slot-type]").value = types[index] || "human";
@@ -133,6 +160,8 @@ function renderConfig(config) {
 function updateControlsForPhase(state) {
   const phase = state.phase;
   const editable = ["setup", "lobby"].includes(phase) && !requestInFlight;
+  const readySlots = new Set((state.players || []).filter((player) => player.status !== "exited").map((player) => player.slot_index));
+  const allSlotsReady = readySlots.size === Number(state.config?.total_slots || 0);
   document.querySelectorAll("#totalSlots,#totalRounds,#turnLimit,#botDelay,#fastSimulation,[data-slot-type]")
     .forEach((element) => { element.disabled = !editable; });
   document.querySelectorAll("[data-bot-strategy]").forEach((element) => {
@@ -140,12 +169,16 @@ function updateControlsForPhase(state) {
     element.disabled = !editable || type !== "bot";
   });
   document.querySelector("#saveConfig").disabled = !editable || !configDirty;
-  document.querySelector("#startGame").disabled = requestInFlight || !["setup", "lobby"].includes(phase) || configDirty;
+  document.querySelector("#startGame").disabled = requestInFlight || !["setup", "lobby"].includes(phase) || configDirty || !allSlotsReady;
+  document.querySelector("#startGame").title = !allSlotsReady ? "모든 참가 슬롯이 준비되어야 시작할 수 있습니다" : "";
   document.querySelector("#pauseGame").disabled = requestInFlight || phase !== "active";
   document.querySelector("#resumeGame").disabled = requestInFlight || phase !== "paused";
   document.querySelector("#finishGame").disabled = requestInFlight || !["active", "paused"].includes(phase);
   document.querySelector("#newGame").disabled = requestInFlight || phase !== "finished";
   document.querySelector("#resetAll").disabled = requestInFlight;
+  document.querySelector("#viewResults").disabled = phase !== "finished";
+  document.querySelector("#hostConfigPanel").classList.toggle("is-locked", phase === "finished");
+  document.querySelector("#configLockNotice").hidden = phase !== "finished";
 
   const labels = { setup: "설정 중", lobby: "참가 대기", active: "진행 중", paused: "일시중지", finished: "종료됨", resetting: "초기화 중" };
   const nextActions = {
@@ -157,10 +190,17 @@ function updateControlsForPhase(state) {
     resetting: "초기화 완료 대기",
   };
   document.querySelector("#gameStatusText").textContent = labels[phase] || phase;
-  document.querySelector("#configStatusText").textContent = configDirty ? "저장되지 않음" : (editable ? "저장됨" : "잠김");
+  document.querySelector("#configStatusText").textContent = configDirty ? "변경사항 있음" : (editable ? "저장됨" : "잠김");
   document.querySelector("#nextActionText").textContent = nextActions[phase] || "상태 확인";
   document.querySelector("#configDirty").hidden = !configDirty;
   document.querySelector("#saveConfig").classList.toggle("attention", configDirty);
+  document.querySelector("#newGame").classList.toggle("is-recommended", phase === "finished");
+  document.querySelector("#pauseGame").classList.toggle("is-recommended", phase === "active");
+  document.querySelector("#resumeGame").classList.toggle("is-recommended", phase === "paused");
+  const guidance = document.querySelector("#configGuidance");
+  guidance.textContent = phase === "finished" ? "🔒 새 게임 준비 후 설정 변경 가능" :
+    (["active", "paused"].includes(phase) ? "🔒 게임 진행 중에는 설정을 변경할 수 없습니다" : "✓ 설정 저장됨");
+  guidance.hidden = configDirty;
 }
 
 function syncSlotStrategyVisibility() {
@@ -208,23 +248,40 @@ function updateDirtyFromForm() {
 }
 
 function renderHostBoard(state) {
+  if (!hostBoardGrid) throw new Error("보드 컨테이너를 찾을 수 없습니다");
+  if (!Array.isArray(state.board) || state.board.length !== 40) {
+    console.error("Invalid board data", {
+      url: "/api/host/state",
+      status: 200,
+      response: state,
+      missingFields: !Array.isArray(state.board) ? ["board"] : [`board length: ${state.board.length}`],
+    });
+    hostBoardGrid.replaceChildren();
+    setBoardStatus("보드 데이터를 불러오지 못했습니다.", "error");
+    return false;
+  }
+  const players = Array.isArray(state.players) ? state.players : [];
+  const buildings = Array.isArray(state.buildings) ? state.buildings : [];
+  const ownership = state.land_ownership || {};
   hostBoardGrid.innerHTML = "";
   state.board.forEach((cell, index) => {
     const coord = boardCoord(index);
     const el = document.createElement("div");
     el.className = `board-cell host-cell cell-${cell.type || "plain"} ${index === 0 ? "start-cell" : ""}`;
-    if (state.players.some((player) => player.position === index)) el.classList.add("current-cell");
+    if (players.some((player) => player.position === index)) el.classList.add("current-cell");
     el.style.setProperty("--x", coord.x);
     el.style.setProperty("--y", coord.y);
-    const buildings = state.buildings.filter((building) => building.region_id === cell.region_id).length;
+    const buildingCount = buildings.filter((building) => building.region_id === cell.region_id).length;
+    const ownerId = cell.region_id ? ownership[cell.region_id] : null;
+    const owner = players.find((player) => player.id === ownerId);
     el.innerHTML = `
       <span class="cell-index">${index}</span>
       <strong>${cellName(cell)}</strong>
-      <small>${buildings ? `건물 ${buildings}` : ""}</small>
+      <small>${owner ? `소유 ${owner.nickname}` : (buildingCount ? `건물 ${buildingCount}` : "")}</small>
       <div class="chip-stack"></div>
     `;
     const chips = el.querySelector(".chip-stack");
-    state.players.filter((player) => player.position === index).forEach((player) => {
+    players.filter((player) => player.position === index).forEach((player) => {
       const chip = document.createElement("span");
       chip.className = `chip ${player.is_bot ? "bot-chip" : ""}`;
       chip.textContent = player.nickname.slice(0, 2);
@@ -232,15 +289,36 @@ function renderHostBoard(state) {
     });
     hostBoardGrid.append(el);
   });
+  setBoardStatus("보드 준비 완료", "ready");
+  window.requestAnimationFrame(() => {
+    const style = window.getComputedStyle(hostBoardGrid);
+    const bounds = hostBoardGrid.getBoundingClientRect();
+    if (!bounds.width || !bounds.height || style.display === "none" || style.visibility === "hidden") {
+      console.error("Board container is not visible", { bounds: bounds.toJSON?.() || bounds, display: style.display, visibility: style.visibility });
+      setBoardStatus("보드 렌더링 영역을 표시할 수 없습니다.", "error");
+    }
+  });
+  return true;
 }
 
 function renderPublicPanels(state) {
   hostPhase.textContent = `${document.querySelector("#gameStatusText").textContent} · R${state.global_round}`;
-  if (serverStatus) {
-    serverStatus.textContent = state.server_status === "online" ? "서버 ON" : "서버 OFF";
-    serverStatus.classList.toggle("on", state.server_status === "online");
-    serverStatus.classList.toggle("off", state.server_status !== "online");
-  }
+  setServerReachability(state.server_status === "online");
+  const hostingOpen = state.engine_phase === "lobby" && !state.ended;
+  document.querySelector("#hostingStatusText").textContent = hostingOpen ? "열림" : "닫힘";
+  const currentPlayer = state.players?.find((player) => player.id === state.current_turn_player_id) || null;
+  const turnName = currentPlayer?.nickname || "-";
+  document.querySelector("#currentRoundText").textContent = state.global_round ?? "-";
+  document.querySelector("#currentTurnText").textContent = turnName;
+  document.querySelector("#summaryRound").textContent = `${state.global_round ?? "-"} / ${state.config?.total_rounds ?? "-"}`;
+  document.querySelector("#summaryPlayers").textContent = `${state.players?.length || 0}명`;
+  document.querySelector("#summaryTurn").textContent = turnName;
+  document.querySelectorAll(".slot-row").forEach((row, index) => {
+    const player = state.players?.find((item) => item.slot_index === index && item.status !== "exited");
+    const status = row.querySelector(".slot-status");
+    if (status) status.textContent = player ? "✓ 준비" : "○ 대기";
+    if (status) status.classList.toggle("waiting", !player);
+  });
   rankingsEl.innerHTML = (state.public_wealth?.players || [])
     .sort((a, b) => (a.rank || 999) - (b.rank || 999))
     .map((row) => `
@@ -287,15 +365,26 @@ async function refresh(forceConfig = false) {
   if (state.error) throw new Error(state.error);
   currentState = state;
   if (forceConfig) configDirty = false;
-  renderConfig(state.config);
-  updateControlsForPhase(state);
-  renderHostBoard(state);
-  renderPublicPanels(state);
-  renderLog(state);
-  renderBotMetrics(state.simulation_results);
+  const renderStep = (name, operation) => {
+    try { operation(); }
+    catch (error) {
+      console.error(`Host render step failed: ${name}`, error);
+      if (name === "board") setBoardStatus("보드 렌더링 중 오류가 발생했습니다.", "error");
+      else showError(`${name} 영역을 표시하지 못했습니다`);
+    }
+  };
+  renderStep("config", () => renderConfig(state.config));
+  renderStep("board", () => renderHostBoard(state));
+  renderStep("game status", () => renderPublicPanels(state));
+  renderStep("controls", () => updateControlsForPhase(state));
+  renderStep("log", () => renderLog(state));
+  renderStep("simulation", () => renderBotMetrics(state.simulation_results));
 }
 
 document.querySelector("#totalSlots").addEventListener("change", () => renderSlots());
+document.querySelector("#viewResults").addEventListener("click", () => {
+  document.querySelector("#resultsPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+});
 document.querySelector("#hostConfigPanel").addEventListener("input", (event) => {
   if (!event.target.matches("button")) {
     updateDirtyFromForm();
@@ -360,8 +449,7 @@ document.querySelector("#hostLogin").addEventListener("click", async () => {
     sessionStorage.setItem("hostCsrfToken", result.csrf_token);
     box.hidden = true;
     await loadHostSession();
-    await refresh();
-    startHostPolling();
+    await initializeHostDashboard();
   } catch (error) { box.textContent = error.message; box.hidden = false; }
 });
 document.querySelector("#hostLogout").addEventListener("click", async () => {
@@ -496,13 +584,35 @@ document.querySelectorAll("[data-dev]").forEach((button) => {
   });
 });
 
-renderSlots();
-loadHostSession().then(async (authenticated) => {
-  if (!authenticated) return;
+async function initializeHostDashboard() {
+  setBoardStatus("보드를 불러오는 중입니다…");
   try {
     await refresh();
     startHostPolling();
   } catch (error) {
+    if (error.message === "host-auth-required") {
+      stopHostPolling();
+      setHostAuthenticated(false);
+      setBoardStatus("호스트 인증이 필요합니다.", "error");
+      return;
+    }
+    setServerReachability(false);
+    setBoardStatus("보드 데이터 요청이 실패했습니다. 잠시 후 다시 시도합니다.", "error");
     showError(error.message);
   }
-});
+}
+
+async function initializeHostPage() {
+  renderSlots();
+  try {
+    const authenticated = await loadHostSession();
+    if (!authenticated) return;
+    await initializeHostDashboard();
+  } catch (error) {
+    setServerReachability(false);
+    showError("호스트 페이지를 초기화하지 못했습니다");
+    console.error("Host page initialization failed", error);
+  }
+}
+
+document.addEventListener("DOMContentLoaded", initializeHostPage, { once: true });

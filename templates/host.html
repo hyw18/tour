@@ -8,38 +8,35 @@
   </head>
   <body class="host-screen">
     <main class="host-dashboard">
-      <section class="host-board-panel"{% if not host_authenticated %} hidden{% endif %}>
-        <div class="host-header">
-          <div>
-            <h1>Tour Economy</h1>
-            <p>전략 보드게임 테이블</p>
-          </div>
-          <div id="hostPhase" class="badge sapphire">대기</div>
-        </div>
-        <div id="hostBoardGrid" class="board-grid host-board" aria-label="호스트 보드"></div>
-      </section>
-
-      <aside class="host-side">
-        <section id="hostAuthPanel" class="panel control-panel">
+      <section id="hostAuthPanel" class="panel control-panel host-auth">
           <h2>호스트 인증</h2>
           <p id="hostAuthStatus">{% if host_authenticated %}인증됨{% else %}서버 터미널에 표시된 토큰을 입력하세요.{% endif %}</p>
           <div class="actions">
             <input id="hostToken" type="password" autocomplete="current-password" placeholder="호스트 토큰">
             <button id="hostLogin">로그인</button>
-            <button id="hostLogout">로그아웃</button>
           </div>
           <div id="hostError" class="error-box" role="alert" hidden></div>
-        </section>
-        <section id="hostConfigPanel" class="panel control-panel"{% if not host_authenticated %} hidden{% endif %}>
-          <div class="settings-heading">
-            <h2>게임 설정</h2>
-            <div id="serverStatus" class="server-status off">서버 OFF</div>
-          </div>
-          <div class="status-summary" aria-live="polite">
-            <p>게임: <strong id="gameStatusText">설정 중</strong></p>
-            <p>설정: <strong id="configStatusText">저장됨</strong></p>
-            <p>다음 행동: <strong id="nextActionText">설정을 확인하세요</strong></p>
-          </div>
+      </section>
+
+      <header class="host-title authenticated-content"{% if not host_authenticated %} hidden{% endif %}>
+        <div><h1>Tour Economy</h1><p>호스트 운영 콘솔</p></div>
+        <button id="hostLogout">로그아웃</button>
+      </header>
+
+      <section class="status-bar authenticated-content" aria-label="게임 운영 상태" aria-live="polite"{% if not host_authenticated %} hidden{% endif %}>
+        <div class="status-card"><span>서버</span><strong id="serverStatus" class="server-status"><i aria-hidden="true">●</i> 확인 중</strong></div>
+        <div class="status-card"><span>호스팅</span><strong><i aria-hidden="true">◆</i> <b id="hostingStatusText">확인 중</b></strong></div>
+        <div class="status-card"><span>게임</span><strong><i aria-hidden="true">■</i> <b id="gameStatusText">설정 중</b></strong></div>
+        <div class="status-card"><span>설정</span><strong><i aria-hidden="true">🔒</i> <b id="configStatusText">저장됨</b></strong></div>
+        <div class="status-card"><span>현재 라운드</span><strong id="currentRoundText">1</strong></div>
+        <div class="status-card"><span>현재 턴</span><strong id="currentTurnText">-</strong></div>
+        <div class="status-card next-action"><span>다음 권장 행동</span><strong>→ <b id="nextActionText">설정을 확인하세요</b></strong></div>
+      </section>
+
+      <div class="host-main-grid authenticated-content"{% if not host_authenticated %} hidden{% endif %}>
+        <section id="hostConfigPanel" class="panel control-panel config-card">
+          <div class="settings-heading"><div><span class="section-kicker">SETUP</span><h2>게임 설정</h2></div><span id="hostPhase" class="badge sapphire">대기</span></div>
+          <div id="configLockNotice" class="lock-notice" hidden>🔒 현재 게임이 종료되어 설정이 잠겨 있습니다.<br>새 게임 준비를 누르면 설정을 다시 변경할 수 있습니다.</div>
           <p class="panel-note">인원과 라운드만 정하면 바로 시작할 수 있습니다.</p>
           <div class="grid host-config-grid">
             <label>참가 슬롯
@@ -75,34 +72,54 @@
             </label>
             <label class="inline"><input id="fastSimulation" type="checkbox"> 애니메이션 생략</label>
           </div>
-          <div id="slots" class="slots"></div>
-          <p id="configDirty" class="panel-note" hidden>저장되지 않은 변경사항</p>
+          <div class="slot-table" role="table" aria-label="참가 슬롯">
+            <div class="slot-header" role="row"><span>슬롯 번호</span><span>참가 유형</span><span>봇 전략</span><span>참가 상태</span></div>
+            <div id="slots" class="slots" role="rowgroup"></div>
+          </div>
+          <p id="configDirty" class="config-message" hidden>● 저장되지 않은 변경사항</p>
+          <p id="configGuidance" class="config-message">✓ 설정 저장됨</p>
           <div id="actionError" class="error-box" role="alert" hidden></div>
-          <h3>설정</h3>
           <div class="actions control-group">
-            <button id="saveConfig">설정 적용</button>
+            <button id="saveConfig" class="primary-action">설정 적용</button>
           </div>
-          <h3>게임 실행</h3>
-          <div class="actions control-group">
-            <button id="startGame">시작</button>
-            <button id="pauseGame">일시중지</button>
-            <button id="resumeGame">재개</button>
-          </div>
-          <h3>게임 종료</h3>
-          <div class="actions control-group">
-            <button id="finishGame" class="danger-action">현재 게임 종료</button>
-            <button id="newGame">새 게임 준비</button>
-          </div>
-          <p class="panel-note">현재 게임 종료는 결과를 확정하고, 새 게임 준비는 설정을 유지합니다.</p>
-          <h3>위험 작업</h3>
-          <div class="actions control-group">
-            <button id="resetAll" class="danger-action">전체 초기화</button>
-          </div>
-          <p class="panel-note">전체 초기화는 설정과 게임 데이터를 기본값으로 복구합니다.</p>
         </section>
 
-        <section class="panel bot-dashboard advanced-panel" hidden aria-hidden="true">
-          <h2>봇 시뮬레이션</h2>
+        <section class="panel operations-card">
+          <div class="settings-heading"><div><span class="section-kicker">CONTROL</span><h2>게임 운영</h2></div></div>
+          <div class="state-overview">
+            <div><span>진행 라운드</span><strong id="summaryRound">1</strong></div>
+            <div><span>참가자</span><strong id="summaryPlayers">0명</strong></div>
+            <div><span>현재 플레이어</span><strong id="summaryTurn">-</strong></div>
+          </div>
+          <h3>게임 실행 제어</h3>
+          <div class="actions control-group">
+            <button id="startGame" class="primary-action">시작</button>
+            <button id="pauseGame" class="secondary-action">일시중지</button>
+            <button id="resumeGame" class="primary-action">재개</button>
+          </div>
+          <h3>종료 및 새 게임</h3>
+          <div class="actions control-group">
+            <button id="finishGame" class="danger-action">현재 게임 종료</button>
+            <button id="newGame" class="primary-action hero-action">새 게임 준비</button>
+            <button id="viewResults" class="secondary-action">결과 보기</button>
+          </div>
+          <details class="danger-zone"><summary>⚠ 위험 작업</summary><p>설정과 게임 데이터를 모두 기본값으로 복구합니다.</p><button id="resetAll" class="danger-action">전체 초기화</button></details>
+
+          <details class="game-details" open><summary>현재 게임 상태 상세</summary>
+            <div class="host-board-panel">
+              <div id="boardStatus" class="board-status" role="status">보드를 불러오는 중입니다…</div>
+              <div id="hostBoardGrid" class="board-grid host-board" aria-label="호스트 보드"></div>
+            </div>
+          </details>
+          <div id="resultsPanel" class="public-panel">
+            <h3>순위와 경제 지표</h3><div id="rankings"></div><div id="economyIndicators"></div><div id="activeEvents"></div>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel bot-dashboard authenticated-content"{% if not host_authenticated %} hidden{% endif %}>
+          <div class="simulation-heading"><span aria-hidden="true">⚙</span><div><span class="section-kicker">SEPARATE TOOL</span><h2>봇 시뮬레이션</h2></div></div>
+          <p class="simulation-notice">봇 시뮬레이션은 실제 게임과 별도로 실행되는 자동 테스트입니다.<br>현재 진행 중인 게임 상태에는 영향을 주지 않습니다.</p>
           <div class="grid sim-grid">
             <label>Seed <input id="simSeed" type="number" value="7"></label>
             <label>반복 <input id="simRuns" type="number" min="1" max="1000" value="10"></label>
@@ -122,17 +139,9 @@
             <a class="download-link" href="/api/export/json">JSON</a>
           </div>
           <div id="botMetrics" class="metric-list"></div>
-        </section>
+      </section>
 
-        <section class="panel public-panel"{% if not host_authenticated %} hidden{% endif %}>
-          <h2>순위와 경제 지표</h2>
-          <div id="rankings"></div>
-          <div id="economyIndicators"></div>
-          <div id="activeEvents"></div>
-        </section>
-      </aside>
-
-      <section class="host-log panel"{% if not host_authenticated %} hidden{% endif %}>
+      <section class="host-log panel authenticated-content"{% if not host_authenticated %} hidden{% endif %}>
         <details>
           <summary>게임 로그</summary>
           <pre id="stateView"></pre>
