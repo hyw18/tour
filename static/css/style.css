@@ -863,3 +863,137 @@ summary { cursor: pointer; font-weight: 750; }
   .slot-row select { min-width: 0; }
   .bot-dashboard .sim-grid, .state-overview { grid-template-columns: 1fr; }
 }
+
+/* Player asset management and request workflow */
+.player-screen .board-cell {
+  min-height: 0;
+  padding: 4px;
+  border-radius: 6px;
+  text-align: left;
+  font-weight: 400;
+}
+
+.player-screen .board-cell:hover {
+  transform: none;
+  border-color: var(--gold);
+}
+
+.detail-list,
+.selected-asset,
+.request-card,
+.bankruptcy-card,
+.trade-description {
+  display: grid;
+  gap: 4px;
+}
+
+.asset-section {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(214, 177, 95, .2);
+}
+
+.asset-section h3,
+.land-trade-box h3 {
+  margin: 0 0 5px;
+  color: var(--gold);
+  font-size: 12px;
+}
+
+.asset-section p {
+  margin-bottom: 4px;
+}
+
+.asset-list {
+  display: grid;
+  gap: 6px;
+}
+
+.asset-row {
+  display: grid;
+  justify-items: start;
+  min-height: 0;
+  padding: 8px;
+  text-align: left;
+}
+
+.asset-row span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.management-panel {
+  position: absolute;
+  inset: 42px 0 0;
+  z-index: 10;
+  overflow: auto;
+  background: rgba(8, 14, 23, .98);
+}
+
+.info-zone {
+  position: relative;
+}
+
+.management-heading,
+.response-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.management-heading h2 {
+  margin: 0;
+}
+
+.management-actions,
+.land-trade-box {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(214, 177, 95, .25);
+}
+
+.selected-asset,
+.request-card,
+.bankruptcy-card {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid rgba(74, 163, 255, .35);
+  border-radius: 6px;
+  background: rgba(74, 163, 255, .07);
+}
+
+.bankruptcy-card {
+  border-color: rgba(216, 76, 103, .55);
+  background: rgba(216, 76, 103, .08);
+}
+
+.action-message {
+  min-height: 30px;
+  padding: 6px;
+  color: var(--emerald);
+  font-size: 11px;
+}
+
+.action-message.error {
+  color: #ffd8df;
+}
+
+.trade-modal {
+  max-height: 44vh;
+  overflow: auto;
+}
+
+.trade-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.response-actions {
+  align-self: stretch;
+}
+
+.compact-hidden {
+  display: none;
+}

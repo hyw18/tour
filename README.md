@@ -2,6 +2,14 @@
 
 Python Flask 기반 로컬 네트워크 멀티플레이 경제 보드게임 구현입니다.
 
+## 공식 게임 규칙
+
+현재 공식 규칙 버전은 `2026.07.15.1`입니다. 기계 판독 기준은
+`data/rules/game_rules.json`이며, 사람이 읽는 명세는
+`docs/GAME_RULES.md`, 코드·테스트 대응과 차이 판정은
+`docs/RULE_IMPLEMENTATION_MATRIX.md`에 있습니다. 규칙 데이터 → 공식 문서 →
+코드 → 테스트 순서로 우선합니다.
+
 ## 실행 방법
 
 ```bash
@@ -63,6 +71,17 @@ pytest -q
 ```
 
 전체 품질 검증 도구는 `pip install -r requirements-dev.txt`로 설치합니다.
+
+실제 Chromium에서 플레이어 UI 흐름까지 검증하려면 최초 한 번 브라우저를 설치합니다.
+
+```bash
+playwright install chromium
+pytest -q tests/test_player_browser.py
+```
+
+플레이어 화면은 브라우저의 서명된 세션과 `localStorage`의 플레이어 ID를 함께
+사용하므로 회전·새로고침 후에도 본인 상태를 복원하며, 다른 브라우저 세션에서는
+해당 플레이어의 현금·세금·대출·거래 상세를 조회할 수 없습니다.
 
 ## 운영 실행
 

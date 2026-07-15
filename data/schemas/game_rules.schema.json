@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["rules_version", "effective_date", "authority_order", "constants", "land_prices_won", "building_prices_won", "special_regions", "settlement_order", "unresolved", "rules"],
+  "properties": {
+    "rules_version": {"type": "string", "pattern": "^[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}\\.[0-9]+$"},
+    "effective_date": {"type": "string", "format": "date"},
+    "authority_order": {"type": "array", "minItems": 4, "items": {"type": "string"}},
+    "constants": {"type": "object"},
+    "land_prices_won": {"type": "object", "minProperties": 25, "additionalProperties": {"type": "integer", "minimum": 0}},
+    "building_prices_won": {"type": "object", "minProperties": 25},
+    "special_regions": {"type": "object", "minProperties": 4},
+    "settlement_order": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "string"}},
+    "unresolved": {"type": "array", "items": {"type": "object", "required": ["rule_id", "question"]}},
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "section", "title", "requirement"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Z]+-[0-9]{3}$"},
+          "section": {"type": "string", "pattern": "^[A-V]$"},
+          "title": {"type": "string", "minLength": 1},
+          "requirement": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -42,7 +42,36 @@ class GameDataLoader:
         self._validate_bot_strategies(loaded["bot_strategies"], "bot_strategies.json")
         self._validate_cross_file_rules(loaded)
         self._validate_schema_files()
+        loaded["official_rules"] = self._load_official_rules()
+        self._validate_official_cross_file_rules(loaded)
         return loaded
+
+    def _load_official_rules(self):
+        filename = "rules/game_rules.json"
+        path = self.data_dir / filename
+        schema_path = self.data_dir / "schemas" / "game_rules.schema.json"
+        if not path.exists():
+            raise DataValidationError(f"{filename}: missing required official rules file")
+        if not schema_path.exists():
+            raise DataValidationError("schemas/game_rules.schema.json: missing required schema file")
+        try:
+            rules = json.loads(path.read_text(encoding="utf-8"))
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            validate(instance=rules, schema=schema)
+        except json.JSONDecodeError as exc:
+            raise DataValidationError(f"{filename}: invalid JSON at line {exc.lineno}") from exc
+        except ValidationError as exc:
+            location = ".".join(str(part) for part in exc.absolute_path)
+            raise DataValidationError(
+                f"{filename}{'.' + location if location else ''}: schema validation failed: {exc.message}"
+            ) from exc
+        ids = [item["id"] for item in rules["rules"]]
+        if len(ids) != len(set(ids)):
+            raise DataValidationError(f"{filename}: rule ids must be unique")
+        unresolved_ids = {item["rule_id"] for item in rules["unresolved"]}
+        if not unresolved_ids.issubset(ids):
+            raise DataValidationError(f"{filename}: unresolved rule id is not registered")
+        return rules
 
     def _require_list(self, value, filename):
         if not isinstance(value, list):
@@ -229,6 +258,24 @@ class GameDataLoader:
             if cell["type"] == "event" and cell.get("event_id") not in event_ids:
                 raise DataValidationError(f"board.json[{index}].event_id: unknown event")
 
+    def _validate_official_cross_file_rules(self, loaded):
+        official = loaded["official_rules"]
+        regions = {region["id"]: region for region in loaded["regions"]}
+        prices = loaded["building_prices"]
+        if official["land_prices_won"] != {
+            region_id: region["land_price"] for region_id, region in regions.items()
+        }:
+            raise DataValidationError("rules/game_rules.json: official land prices differ from regions.json")
+        if official["building_prices_won"] != prices:
+            raise DataValidationError("rules/game_rules.json: official building prices differ from building_prices.json")
+        official_special = {
+            item_id: item["initial_price_won"]
+            for item_id, item in official["special_regions"].items()
+        }
+        actual_special = {item["id"]: item["initial_price"] for item in loaded["special_regions"]}
+        if official_special != actual_special:
+            raise DataValidationError("rules/game_rules.json: official special prices differ from special_regions.json")
+
     def _validate_schema_files(self):
         schema_dir = self.data_dir / "schemas"
         required = [
@@ -239,6 +286,7 @@ class GameDataLoader:
             "special_regions.schema.json",
             "events.schema.json",
             "bot_strategies.schema.json",
+            "game_rules.schema.json",
         ]
         for name in required:
             path = schema_dir / name

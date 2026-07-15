@@ -1,7 +1,7 @@
 import os
 from functools import wraps
 
-from flask import Blueprint, Response, abort, current_app, jsonify, render_template, request
+from flask import Blueprint, Response, abort, current_app, jsonify, render_template, request, session
 
 from .engine import GameRuleError
 
@@ -40,6 +40,13 @@ def debug_tools_enabled():
 
 def json_error(message, status=400):
     return jsonify({"error": message}), status
+
+
+def boolean_field(payload, name):
+    value = payload.get(name)
+    if not isinstance(value, bool):
+        raise GameRuleError(f"{name} must be boolean")
+    return value
 
 
 def mutating_route(handler=None, *, allow_ended=False):
@@ -145,7 +152,14 @@ def api_config():
 @mutating_route
 def api_join():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().join(payload.get("nickname"))
+    player = engine().join(payload.get("nickname"))
+    current_ids = {item.id for item in engine().state.players}
+    player_ids = [item for item in session.get("player_ids", []) if item in current_ids]
+    if player["id"] not in player_ids:
+        player_ids.append(player["id"])
+    session["player_ids"] = player_ids
+    session["player_id"] = player["id"]
+    return player
 
 
 @bp.post("/api/start")
@@ -211,6 +225,7 @@ def api_host_reset():
 @mutating_route
 def api_roll():
     payload = request.get_json(force=True, silent=True) or {}
+    require_player(payload.get("player_id"))
     return engine().roll_dice(payload.get("player_id"))
 
 
@@ -218,101 +233,137 @@ def api_roll():
 @mutating_route
 def api_end_turn():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().end_turn(payload.get("player_id"))
+    require_player(payload.get("player_id"))
+    engine().end_turn(payload.get("player_id"))
+    return views().public()
 
 
 @bp.post("/api/purchase-land")
 @mutating_route
 def api_purchase_land():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().purchase_land(payload.get("player_id"))
+    require_player(payload.get("player_id"))
+    engine().purchase_land(payload.get("player_id"))
+    return views().public()
 
 
 @bp.post("/api/decline-action")
 @mutating_route
 def api_decline_action():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().decline_pending_action(payload.get("player_id"))
+    require_player(payload.get("player_id"))
+    engine().decline_pending_action(payload.get("player_id"))
+    return views().public()
 
 
 @bp.post("/api/build")
 @mutating_route
 def api_build():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().build_on_land(payload.get("player_id"), payload.get("building_type"))
+    require_player(payload.get("player_id"))
+    engine().build_on_land(payload.get("player_id"), payload.get("building_type"))
+    return views().public()
 
 
 @bp.post("/api/sell-building")
 @mutating_route
 def api_sell_building():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().sell_building(payload.get("player_id"), payload.get("building_id"))
+    require_player(payload.get("player_id"))
+    engine().sell_building(payload.get("player_id"), payload.get("building_id"))
+    return views().public()
 
 
 @bp.post("/api/purchase-special")
 @mutating_route
 def api_purchase_special():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().purchase_special_region(payload.get("player_id"))
+    require_player(payload.get("player_id"))
+    engine().purchase_special_region(payload.get("player_id"))
+    return views().public()
 
 
 @bp.post("/api/trade/land/propose")
 @mutating_route
 def api_trade_land_propose():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().propose_land_trade(payload.get("requester_id"), payload.get("buyer_id"), payload.get("region_id"))
+    require_player(payload.get("requester_id"))
+    engine().propose_land_trade(payload.get("requester_id"), payload.get("buyer_id"), payload.get("region_id"))
+    return views().public()
 
 
 @bp.post("/api/trade/land/respond")
 @mutating_route
 def api_trade_land_respond():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().respond_land_trade(payload.get("responder_id"), bool(payload.get("accept")))
+    require_player(payload.get("responder_id"))
+    engine().respond_land_trade(payload.get("responder_id"), boolean_field(payload, "accept"))
+    return views().public()
 
 
 @bp.post("/api/operating-right/transfer/propose")
 @mutating_route
 def api_operating_right_transfer_propose():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().propose_operating_right_transfer(
+    require_player(payload.get("requester_id"))
+    engine().propose_operating_right_transfer(
         payload.get("requester_id"),
         payload.get("target_id"),
         payload.get("building_id"),
         payload.get("price_won"),
     )
+    return views().public()
 
 
 @bp.post("/api/operating-right/transfer/respond")
 @mutating_route
 def api_operating_right_transfer_respond():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().respond_operating_right_transfer(payload.get("responder_id"), bool(payload.get("accept")))
+    require_player(payload.get("responder_id"))
+    engine().respond_operating_right_transfer(payload.get("responder_id"), boolean_field(payload, "accept"))
+    return views().public()
 
 
 @bp.post("/api/usage-change/request")
 @mutating_route
 def api_usage_change_request():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().request_usage_change(payload.get("requester_id"), payload.get("building_id"), payload.get("new_type"))
+    require_player(payload.get("requester_id"))
+    engine().request_usage_change(payload.get("requester_id"), payload.get("building_id"), payload.get("new_type"))
+    return views().public()
 
 
 @bp.post("/api/usage-change/respond")
 @mutating_route
 def api_usage_change_respond():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().respond_usage_change(payload.get("approver_id"), bool(payload.get("approve")))
+    require_player(payload.get("approver_id"))
+    engine().respond_usage_change(payload.get("approver_id"), boolean_field(payload, "approve"))
+    return views().public()
 
 
 @bp.post("/api/operating-right/recall")
 @mutating_route
 def api_operating_right_recall():
     payload = request.get_json(force=True, silent=True) or {}
-    return engine().recall_operating_rights(payload.get("requester_id"), payload.get("building_id"))
+    require_player(payload.get("requester_id"))
+    engine().recall_operating_rights(payload.get("requester_id"), payload.get("building_id"))
+    return views().public()
+
+
+@bp.post("/api/revive")
+@mutating_route
+def api_revive():
+    payload = request.get_json(force=True, silent=True) or {}
+    require_player(payload.get("player_id"))
+    engine().revive_player(payload.get("player_id"))
+    return views().public()
 
 
 @bp.post("/api/event/trigger")
 @mutating_route
 def api_event_trigger():
+    require_host()
     payload = request.get_json(force=True, silent=True) or {}
     return engine().trigger_event(
         payload.get("event_id"),
@@ -415,7 +466,10 @@ def require_phase(*allowed):
 
 
 def require_player(player_id):
-    if request.headers.get("X-Player-Id") != player_id:
+    claimed_player_id = request.headers.get("X-Player-Id")
+    if claimed_player_id is not None and claimed_player_id != player_id:
+        raise PermissionDenied("player permission is required")
+    if not player_id or player_id not in session.get("player_ids", []):
         raise PermissionDenied("player permission is required")
 
 
@@ -523,6 +577,15 @@ def dev_create_building():
     require_host()
     payload = request.get_json(force=True, silent=True) or {}
     return engine().create_building(payload.get("player_id"), payload.get("region_id"), payload.get("building_type"))
+
+
+@dev_bp.post("/api/dev/sell-building")
+@mutating_route
+def dev_sell_building():
+    require_debug_tools()
+    require_host()
+    payload = request.get_json(force=True, silent=True) or {}
+    return engine().sell_building(payload.get("player_id"), payload.get("building_id"))
 
 
 @dev_bp.post("/api/dev/create-chain")

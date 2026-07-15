@@ -3,3 +3,4 @@ coverage==7.10.1
 ruff==0.12.4
 mypy==1.17.0
 bandit==1.8.6
+playwright==1.61.0

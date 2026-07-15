@@ -3,6 +3,7 @@ from random import Random, randint
 from time import monotonic
 
 from .data_loader import GameDataLoader
+from .bots import BotController
 from .models import (
     ALLOWED_BOT_DELAYS,
     ALLOWED_ROUNDS,
@@ -39,10 +40,12 @@ class GameEngine:
     def __init__(self, data_dir):
         self.data_dir = data_dir
         self.data = GameDataLoader(data_dir).load()
+        self.rules = self.data["official_rules"]
         self.state = GameState()
         self.state.special_values = {item["id"]: item["initial_price"] for item in self.data["special_regions"]}
         self._human_join_order = 0
         self.repository = StateRepository(self.state, self.MAX_PROCESSED_KEYS)
+        self.bot_controller = BotController(self)
 
     def run_serialized(self, operation):
         """Run one state operation under the game-wide reentrant lock."""
@@ -172,8 +175,8 @@ class GameEngine:
         if not self.state.turn_has_rolled:
             self.roll_dice(player_id)
         if player.is_bot:
-            self._bot_consider_asset_disposal(player)
-            self._perform_bot_investment(player)
+            self.bot_controller.consider_asset_disposal(player)
+            self.bot_controller.perform_investment(player)
         self._finish_turn(player_id)
         return self.public_state()
 
@@ -701,6 +704,9 @@ class GameEngine:
         buyer = self._find_player(buyer_id)
         if not buyer:
             raise GameRuleError("trade target not found")
+        if buyer.id == requester.id or buyer.status != "active":
+            raise GameRuleError("trade target must be another active player")
+        self._require_no_active_request()
         self._validate_land_trade(requester, buyer, region_id)
         self.state.land_trade_offer = {
             "id": new_id("trade"),
@@ -715,7 +721,7 @@ class GameEngine:
         self.state.turn_elapsed_before_pause = self.elapsed_turn_seconds()
         self.state.turn_started_at = None
         if buyer.is_bot:
-            return self.respond_land_trade(buyer.id, self._bot_accepts_trade(buyer, self.state.land_trade_offer))
+            return self.respond_land_trade(buyer.id, self.bot_controller.accepts_land_trade(buyer, self.state.land_trade_offer))
         return self.public_state()
 
     def respond_land_trade(self, responder_id, accept):
@@ -770,6 +776,15 @@ class GameEngine:
         building = self._find_building(building_id)
         if not target or not building:
             raise GameRuleError("transfer target or building not found")
+        if target.id == requester.id or target.status != "active":
+            raise GameRuleError("transfer target must be another active player")
+        try:
+            price_won = int(price_won)
+        except (TypeError, ValueError) as exc:
+            raise GameRuleError("transfer price must be an integer") from exc
+        if price_won < 0:
+            raise GameRuleError("transfer price cannot be negative")
+        self._require_no_active_request()
         self._require_chain_member_on_region(requester, building)
         if self.state.successful_build_edit_this_visit:
             raise GameRuleError("building edit action already used this visit")
@@ -781,7 +796,7 @@ class GameEngine:
             "requester_id": requester.id,
             "target_id": target.id,
             "building_id": building_id,
-            "price_won": int(price_won),
+            "price_won": price_won,
             "created_at": monotonic(),
             "timeout_seconds": 10,
             "requester_elapsed_before_trade": self.elapsed_turn_seconds(),
@@ -789,7 +804,7 @@ class GameEngine:
         self.state.turn_elapsed_before_pause = self.elapsed_turn_seconds()
         self.state.turn_started_at = None
         if target.is_bot:
-            return self.respond_operating_right_transfer(target.id, self._bot_accepts_operating_right(target, self.state.operating_right_offer))
+            return self.respond_operating_right_transfer(target.id, self.bot_controller.accepts_operating_right(target, self.state.operating_right_offer))
         return self.public_state()
 
     def respond_operating_right_transfer(self, responder_id, accept):
@@ -818,6 +833,7 @@ class GameEngine:
         building = self._find_building(building_id)
         if not building:
             raise GameRuleError("building not found")
+        self._require_no_active_request()
         self._require_chain_member_on_region(requester, building)
         if new_type not in BUILDING_TYPES:
             raise GameRuleError("unsupported building type")
@@ -854,7 +870,7 @@ class GameEngine:
             if forced is not None:
                 self.respond_usage_change(approver_id, forced)
             elif approver and approver.is_bot:
-                self.respond_usage_change(approver_id, self._bot_approves_usage_change(approver, self.state.usage_change_request))
+                self.respond_usage_change(approver_id, self.bot_controller.approves_usage_change(approver, self.state.usage_change_request))
         if not approvers:
             self._execute_usage_change()
         return self.public_state()
@@ -1003,6 +1019,7 @@ class GameEngine:
     def public_state(self):
         config = self.state.config
         return {
+            "rules_version": self.rules["rules_version"],
             "phase": self.ui_phase(),
             "engine_phase": self.state.phase,
             "server_status": "online",
@@ -1096,15 +1113,40 @@ class GameEngine:
         state["land_trade_offer"] = self._public_offer_summary(state.get("land_trade_offer"), "land_trade")
         state["operating_right_offer"] = self._public_offer_summary(state.get("operating_right_offer"), "operating_right")
         state["usage_change_request"] = self._public_offer_summary(state.get("usage_change_request"), "usage_change")
+        state.pop("pending_commercial_sale_refunds", None)
+        state.pop("bankruptcy_records", None)
+        state.pop("pending_land_takeover", None)
+        state["regions"] = deepcopy(self.data["regions"])
+        state["special_regions"] = deepcopy(self.data["special_regions"])
+        state["special_region_details"] = self._special_region_details()
         return state
+
+    def _special_region_details(self):
+        details = {}
+        for special in self.data["special_regions"]:
+            special_id = special["id"]
+            initial = special["initial_price"]
+            current = self.state.special_values.get(special_id, initial)
+            increase = apply_rate(initial, 20, 100)
+            details[special_id] = {
+                "special_region_id": special_id,
+                "name": special["name"],
+                "initial_price_won": initial,
+                "current_value_won": current,
+                "external_visits": max(0, (current - initial) // max(1, increase)),
+                "next_increase_won": increase,
+                "owner_id": self.state.special_ownership.get(special_id),
+                "forced_sale_min_won": apply_rate_rounded_50k(current, 84, 100),
+                "forced_sale_max_won": apply_rate_rounded_50k(current, 104, 100),
+            }
+        return details
 
     def _public_offer_summary(self, offer, offer_type):
         if not offer:
             return None
         return {
             "type": offer_type,
-            "requester_id": offer.get("requester_id"),
-            "target_id": offer.get("buyer_id") or offer.get("target_id"),
+            "active": True,
             "timeout_seconds": offer.get("timeout_seconds", 10),
             "response_rule": "auto_approve" if offer_type == "usage_change" else "auto_reject",
         }
@@ -1113,13 +1155,293 @@ class GameEngine:
         player = self._find_player(player_id)
         if not player:
             raise GameRuleError("player not found")
+        ledger = deepcopy(self.state.ledgers.get(player.id, {}))
+        loan = deepcopy(self.state.loans.get(player.id))
+        if loan:
+            loan["interest_won"] = loan["total_due_won"] - loan["principal_won"]
+            loan["due_laps_remaining"] = max(0, loan["due_lap"] - self.state.lap_numbers.get(player.id, 0))
+            loan["auto_repay"] = True
+        refunds = [
+            deepcopy(item)
+            for item in self.state.pending_commercial_sale_refunds
+            if item["player_id"] == player.id
+        ]
+        last_settlement = self.state.last_settlement
+        if not last_settlement or last_settlement.get("player_id") != player.id:
+            last_settlement = None
         return {
             "player": player.public(),
-            "ledger": deepcopy(self.state.ledgers.get(player.id, {})),
-            "loan": deepcopy(self.state.loans.get(player.id)),
+            "ledger": ledger,
+            "loan": loan,
             "tax_rate_bps": self._calculate_tax_rate_bps(player),
             "report": self._build_personal_report(player),
             "asset_history": deepcopy(self.state.asset_history.get(player.id, [])),
+            "assets": self._player_assets(player),
+            "pending_commercial_sale_refunds": refunds,
+            "last_settlement": deepcopy(last_settlement),
+            "allowed_actions": self._allowed_actions(player),
+            "related_requests": self._related_requests(player),
+            "bankruptcy": self._player_bankruptcy_state(player),
+            "turn_remaining_seconds": self._turn_remaining_seconds(),
+            "recent_income": deepcopy(ledger.get("income_entries", [])[-10:]),
+            "recent_expenses": deepcopy(ledger.get("expense_entries", [])[-10:]),
+            "active_events": [
+                deepcopy(event)
+                for event in self.state.active_events
+                if event.get("player_id") in {None, player.id}
+            ],
+        }
+
+    def _turn_remaining_seconds(self):
+        limit = self.state.config.turn_limit_seconds
+        if limit is None:
+            return None
+        return max(0, round(limit - self.elapsed_turn_seconds(), 1))
+
+    def _action(self, allowed, reason="", **details):
+        return {"allowed": bool(allowed), "reason": "" if allowed else reason, **details}
+
+    def _allowed_actions(self, player):
+        accepting = self.state.phase == "active" and not self.state.paused and not self.state.ended
+        is_turn = accepting and self.current_player() is not None and self.current_player().id == player.id
+        turn_reason = "현재 차례가 아닙니다."
+        if not accepting:
+            turn_reason = "현재 게임 상태에서는 행동할 수 없습니다."
+        elif player.status != "active":
+            turn_reason = "활성 플레이어만 행동할 수 있습니다."
+        pending = self.state.pending_action if is_turn and self.state.pending_action and self.state.pending_action.get("player_id") == player.id else None
+        cell = self.data["board"][player.position]
+        current_region_id = cell.get("region_id") if cell.get("type") == "region" else None
+        edit_used = self.state.successful_build_edit_this_visit
+        request_active = bool(self.state.land_trade_offer or self.state.operating_right_offer or self.state.usage_change_request)
+        current_buildings = [item for item in self.state.buildings if item["region_id"] == current_region_id]
+        owned_current = bool(current_region_id and self.state.land_ownership.get(current_region_id) == player.id)
+        chain_buildings = [item for item in current_buildings if player.id in item.get("ownership_chain", [])]
+
+        trade_targets = []
+        if is_turn and owned_current:
+            for target in self._turn_players():
+                if target.id == player.id:
+                    continue
+                try:
+                    self._validate_land_trade(player, target, current_region_id)
+                except GameRuleError:
+                    continue
+                trade_targets.append({"id": target.id, "nickname": target.nickname})
+
+        build_allowed = bool(pending and pending.get("type") == "build" and not edit_used)
+        build_reason = "현재 지역에서 건설할 수 없습니다."
+        if edit_used:
+            build_reason = "이번 방문의 건물 편집 기회를 이미 사용했습니다."
+        elif not owned_current:
+            build_reason = "내 토지가 아닙니다."
+
+        has_sellable = any(
+            item["nominal_owner_id"] == player.id and len(item.get("ownership_chain", [])) == 1
+            for item in current_buildings
+        )
+        can_manage = is_turn and bool(current_region_id) and bool(chain_buildings or owned_current) and not edit_used and not request_active
+        actions = {
+            "roll": self._action(is_turn and not self.state.turn_has_rolled, "이미 주사위를 굴렸습니다." if is_turn else turn_reason),
+            "end_turn": self._action(is_turn, turn_reason),
+            "purchase_land": self._action(bool(pending and pending.get("type") == "purchase_land"), "구매 가능한 토지에 도착하지 않았습니다."),
+            "decline_action": self._action(bool(pending), "포기할 대기 행동이 없습니다."),
+            "purchase_special": self._action(bool(pending and pending.get("type") == "purchase_special"), "구매 가능한 특수지역에 도착하지 않았습니다."),
+            "build": self._action(build_allowed, build_reason, building_types=list((pending or {}).get("available_buildings", []))),
+            "manage": self._action(can_manage, "현재 지역에서 실행 가능한 관리 행동이 없습니다."),
+            "sell_building": self._action(can_manage and has_sellable, "매각 가능한 단독 소유 건물이 없습니다."),
+            "propose_land_trade": self._action(is_turn and owned_current and bool(trade_targets) and not request_active, "다른 요청이 진행 중이거나 권리가 분산되어 거래할 수 없습니다.", targets=trade_targets, region_id=current_region_id),
+            "propose_operating_right": self._action(can_manage and bool(chain_buildings), "현재 지역에 양도할 운영권이 없습니다."),
+            "request_usage_change": self._action(can_manage and bool(chain_buildings), "현재 지역에 용도 변경할 권리 보유 건물이 없습니다."),
+            "recall_rights": self._action(
+                can_manage and any(player.id in item.get("ownership_chain", [])[:-1] for item in chain_buildings),
+                "회수할 하위 운영권이 없습니다.",
+            ),
+            "revive": self._action(self._can_revive(player), self._revival_reason(player)),
+        }
+        actions["trade"] = self._action(
+            actions["propose_land_trade"]["allowed"] or actions["propose_operating_right"]["allowed"],
+            "현재 지역에서 가능한 거래가 없습니다.",
+        )
+        return actions
+
+    def _player_assets(self, player):
+        player_names = {item.id: item.nickname for item in self.state.players}
+        lands = []
+        for region_id, owner_id in self.state.land_ownership.items():
+            if owner_id != player.id:
+                continue
+            region = self.region_by_id(region_id)
+            lands.append({
+                "region_id": region_id,
+                "name": region["name"],
+                "land_price_won": region["land_price"],
+                "building_ids": [item["id"] for item in self.state.buildings if item["region_id"] == region_id],
+            })
+
+        buildings = []
+        for building in self.state.buildings:
+            chain = list(building.get("ownership_chain") or [building["nominal_owner_id"]])
+            if player.id not in chain and building.get("nominal_owner_id") != player.id:
+                continue
+            region = self.region_by_id(building["region_id"])
+            operator_id = chain[-1]
+            rate_bps = 0
+            rate_kind = "없음"
+            if building["building_type"] == "industrial":
+                rate_bps = self._adjusted_industrial_rate_bps(player, building["region_id"])
+                rate_kind = "출발지 수익률"
+            elif building["building_type"] == "mixed_use":
+                raw = self._adjusted_industrial_rate_bps(player, building["region_id"]) - 200
+                rate_bps = raw if self.state.industrial_return_explicit_override else self._clamp(raw, 0, 2200)
+                rate_kind = "출발지 수익률"
+            elif building["building_type"] == "commercial":
+                rate_bps = self._building_visit_fee_rate_bps(building["region_id"], "commercial")
+                rate_kind = "방문료율"
+            can_sell = (
+                self.current_player() is not None
+                and self.current_player().id == player.id
+                and building["nominal_owner_id"] == player.id
+                and len(chain) == 1
+                and self.data["board"][player.position].get("region_id") == building["region_id"]
+                and not self.state.successful_build_edit_this_visit
+            )
+            on_region = self.data["board"][player.position].get("region_id") == building["region_id"]
+            can_edit = self.current_player() is not None and self.current_player().id == player.id and on_region and not self.state.successful_build_edit_this_visit
+            nominal_owner = self._find_player(chain[0])
+            can_recall = can_edit and player.id in chain[:-1] and bool(nominal_owner and nominal_owner.cash_won >= max(0, int(building["market_value_won"])))
+            requester_index = chain.index(player.id)
+            usage_chain = ([chain[0], player.id] if player.id != chain[0] else [chain[0]]) + [item for item in chain[1:] if item != player.id]
+            usage_options = {}
+            for building_type in sorted(BUILDING_TYPES):
+                cost = self.data["building_prices"][building["region_id"]][building_type]
+                blocked_key = (player.id, building["id"], building_type, self.state.lap_numbers.get(player.id, 0), player.position)
+                limit_blocked = building_type in {"industrial", "mixed_use"} and self._building_count_excluding(building["region_id"], building_type, building["id"]) >= 1
+                option_allowed = can_edit and player.cash_won >= cost and not limit_blocked and blocked_key not in self.state.blocked_usage_change_requests
+                reason = ""
+                if not can_edit:
+                    reason = "권리 보유자가 해당 지역에 정확히 도착해야 합니다."
+                elif player.cash_won < cost:
+                    reason = "용도 변경 비용이 부족합니다."
+                elif limit_blocked:
+                    reason = f"{building_type} 건물은 지역당 하나만 허용됩니다."
+                elif blocked_key in self.state.blocked_usage_change_requests:
+                    reason = "같은 방문에서 거절된 요청은 다시 보낼 수 없습니다."
+                usage_options[building_type] = {
+                    "allowed": option_allowed,
+                    "reason": reason,
+                    "cost_won": cost,
+                    "expected_chain": usage_chain,
+                }
+            sale_mode = {
+                "residential": "현재 시세 즉시 지급",
+                "commercial": "현재 시세 50%를 다음 출발지에서 지급",
+                "industrial": "즉시 지급 없이 제거",
+                "mixed_use": "즉시 지급 없이 제거",
+            }[building["building_type"]]
+            buildings.append({
+                **deepcopy(building),
+                "region_name": region["name"],
+                "adjusted_market_value_won": self.adjusted_building_value(building),
+                "nominal_owner_name": player_names.get(building["nominal_owner_id"], building["nominal_owner_id"]),
+                "operator_name": player_names.get(operator_id, operator_id),
+                "ownership_chain_names": [player_names.get(item, item) for item in chain],
+                "return_rate_bps": rate_bps,
+                "return_rate_kind": rate_kind,
+                "sale_mode": sale_mode,
+                "immediate_sale_proceeds_won": max(0, int(building["market_value_won"])) if building["building_type"] == "residential" else 0,
+                "scheduled_refund_won": apply_rate_rounded_50k(max(0, int(building["market_value_won"])), 50, 100) if building["building_type"] == "commercial" else 0,
+                "can_sell": can_sell,
+                "sell_reason": "" if can_sell else "정확한 지역 도착, 단독 소유, 미사용 편집 기회가 필요합니다.",
+                "can_transfer": can_edit and player.id in chain,
+                "transfer_reason": "" if can_edit and player.id in chain else "권리 보유자가 해당 지역에 정확히 도착해야 합니다.",
+                "can_request_usage_change": can_edit and player.id in chain,
+                "usage_change_reason": "" if can_edit and player.id in chain else "권리 보유자가 해당 지역에 정확히 도착해야 합니다.",
+                "usage_change_options": usage_options,
+                "can_recall": can_recall,
+                "recall_reason": "" if can_recall else "하위 권리가 없거나 명목 소유자가 회수 시세를 지급할 수 없습니다.",
+                "recall_preview": {
+                    "requester_id": player.id,
+                    "nominal_owner_id": chain[0],
+                    "current_operator_id": chain[-1],
+                    "current_chain": chain,
+                    "expected_chain": chain[: requester_index + 1],
+                    "payout_won": max(0, int(building["market_value_won"])),
+                    "payer_name": player_names.get(chain[0], chain[0]),
+                    "recipient_name": player_names.get(chain[-1], chain[-1]),
+                },
+            })
+
+        specials = []
+        for special in self._special_region_details().values():
+            if special["owner_id"] != player.id:
+                continue
+            specials.append(deepcopy(special))
+        return {"lands": lands, "buildings": buildings, "special_regions": specials}
+
+    def _request_view(self, offer, request_type, player):
+        if not offer:
+            return None
+        participants = {offer.get("requester_id"), offer.get("buyer_id"), offer.get("target_id")}
+        participants.update(offer.get("approvers", []))
+        if player.id not in participants:
+            return None
+        result = deepcopy(offer)
+        result["type"] = request_type
+        result["remaining_seconds"] = max(0, round(offer.get("timeout_seconds", 10) - (monotonic() - offer["created_at"]), 1))
+        result["response_rule"] = "auto_approve" if request_type == "usage_change" else "auto_reject"
+        result["requester_name"] = getattr(self._find_player(offer.get("requester_id")), "nickname", offer.get("requester_id"))
+        target_id = offer.get("buyer_id") or offer.get("target_id")
+        result["target_name"] = getattr(self._find_player(target_id), "nickname", target_id)
+        result["can_respond"] = player.id in ({offer.get("buyer_id"), offer.get("target_id")} | set(offer.get("approvers", []))) and player.id not in offer.get("responses", {})
+        if offer.get("building_id"):
+            building = self._find_building(offer["building_id"])
+            if building:
+                result["current_chain"] = list(building.get("ownership_chain", []))
+                if request_type == "operating_right":
+                    result["expected_chain"] = result["current_chain"] + [offer["target_id"]]
+                elif request_type == "usage_change":
+                    requester_id = offer["requester_id"]
+                    nominal = result["current_chain"][0]
+                    rest = [item for item in result["current_chain"][1:] if item != requester_id]
+                    result["expected_chain"] = ([nominal, requester_id] if requester_id != nominal else [nominal]) + rest
+        return result
+
+    def _related_requests(self, player):
+        return [
+            item
+            for item in (
+                self._request_view(self.state.land_trade_offer, "land_trade", player),
+                self._request_view(self.state.operating_right_offer, "operating_right", player),
+                self._request_view(self.state.usage_change_request, "usage_change", player),
+            )
+            if item
+        ]
+
+    def _revival_reason(self, player):
+        if player.status == "exited":
+            return "자동 퇴장자는 부활할 수 없습니다."
+        if player.status != "bankrupt":
+            return "파산 상태가 아닙니다."
+        record = self.state.bankruptcy_records.get(player.id)
+        if not record:
+            return "파산 기록이 없습니다."
+        waited = self.state.global_round - record["bankruptcy_round"]
+        if waited < 20:
+            return f"부활까지 {20 - waited}라운드 남았습니다."
+        if record["remaining_rounds"] <= 40:
+            return "파산 당시 남은 라운드가 40 이하입니다."
+        return "순위 또는 부활 횟수 조건을 충족하지 못했습니다."
+
+    def _player_bankruptcy_state(self, player):
+        record = deepcopy(self.state.bankruptcy_records.get(player.id))
+        return {
+            "status": player.status,
+            "record": record,
+            "can_revive": self._can_revive(player),
+            "reason": self._revival_reason(player),
+            "revival_count": self.state.revival_counts.get(player.id, 0),
+            "spectating": player.status in {"bankrupt", "spectator", "exited"},
         }
 
     def public_wealth(self):
@@ -1533,6 +1855,10 @@ class GameEngine:
         chain = building.get("ownership_chain") or [building["nominal_owner_id"]]
         return chain[-1]
 
+    def _require_no_active_request(self):
+        if self.state.land_trade_offer or self.state.operating_right_offer or self.state.usage_change_request:
+            raise GameRuleError("another trade or approval request is already active")
+
     def expire_operating_right_offer(self):
         if self.state.operating_right_offer and monotonic() - self.state.operating_right_offer["created_at"] >= 10:
             self.state.operating_right_offer = None
@@ -1564,27 +1890,6 @@ class GameEngine:
         self.state.successful_build_edit_this_visit = True
         self.state.usage_change_request = None
 
-    def _bot_accepts_operating_right(self, bot, offer):
-        building = self._find_building(offer["building_id"])
-        expected_income = apply_rate_rounded_50k(building["market_value_won"], 12, 100) if building else 0
-        accept = bot.cash_won >= offer["price_won"] and expected_income >= int(offer["price_won"] * 0.1)
-        if bot.bot_strategy == "aggressive":
-            accept = bot.cash_won >= offer["price_won"]
-        if bot.bot_strategy == "conservative":
-            accept = accept and not self.state.loans.get(bot.id)
-        self._log_bot_decision(bot, f"{'accept' if accept else 'reject'} operating right price={offer['price_won']} expected={expected_income}")
-        return accept
-
-    def _bot_approves_usage_change(self, bot, request):
-        new_type = request["new_type"]
-        approve = True
-        if bot.bot_strategy == "conservative" and new_type in {"commercial", "mixed_use"}:
-            approve = False
-        if bot.bot_strategy == "aggressive" and new_type in {"commercial", "mixed_use"}:
-            approve = True
-        self._log_bot_decision(bot, f"{'approve' if approve else 'reject'} usage change to {new_type}")
-        return approve
-
     def _validate_land_trade(self, requester, buyer, region_id):
         self.region_by_id(region_id)
         cell = self.data["board"][requester.position]
@@ -1615,22 +1920,6 @@ class GameEngine:
             requester.lands.remove(region_id)
         if region_id not in buyer.lands:
             buyer.lands.append(region_id)
-
-    def _bot_accepts_trade(self, bot, offer):
-        price = offer["price_won"]
-        if bot.cash_won < price or bot.cash_won < 0:
-            self._log_bot_decision(bot, f"reject trade {offer['region_id']}: cash risk")
-            return False
-        if bot.bot_strategy == "aggressive":
-            accept = bot.cash_won - price >= int(bot.cash_won * 0.10)
-        elif bot.bot_strategy == "conservative":
-            accept = bot.cash_won - price >= int(bot.cash_won * 0.50) and not self.state.loans.get(bot.id)
-        elif bot.bot_strategy == "random":
-            accept = randint(1, 2) == 1
-        else:
-            accept = bot.cash_won - price >= int(bot.cash_won * 0.25)
-        self._log_bot_decision(bot, f"{'accept' if accept else 'reject'} trade {offer['region_id']} price={price}")
-        return accept
 
     def commercial_visit_fee_rate(self, region_id):
         grade = self.region_by_id(region_id)["commercial_grade"]
@@ -2234,105 +2523,6 @@ class GameEngine:
             }
         )
         self.state.game_log = self.state.game_log[-1000:]
-
-    def _perform_bot_investment(self, player):
-        pending = self.state.pending_action
-        if not pending or pending.get("player_id") != player.id:
-            return
-        self._log_bot_decision(player, f"pending={pending['type']} cash={player.cash_won} tax={self._calculate_tax_rate_bps(player)} loan={bool(self.state.loans.get(player.id))}")
-        if player.cash_won < 0:
-            self._log_bot_decision(player, "skip investment: negative cash")
-            self.decline_pending_action(player.id)
-            return
-        if pending["type"] == "purchase_land":
-            if self._bot_should_buy_land(player, pending["price_won"]):
-                self._log_bot_decision(player, f"buy land expected_fee={apply_rate_rounded_50k(pending['price_won'], 5, 100)} price={pending['price_won']}")
-                self.purchase_land(player.id)
-            else:
-                if player.bot_strategy == "conservative" and self.state.loans.get(player.id):
-                    self._log_bot_decision(player, "skip land: loan risk, sale review preferred")
-                self.decline_pending_action(player.id)
-            return
-        if pending["type"] == "build":
-            if self.state.successful_build_edit_this_visit:
-                self._log_bot_decision(player, "skip build: building edit already used this visit")
-                self.decline_pending_action(player.id)
-                return
-            choice = self._bot_building_choice(player, pending["region_id"], pending["available_buildings"])
-            if choice:
-                self._log_bot_decision(player, f"build {choice} cost={self.data['building_prices'][pending['region_id']][choice]}")
-                self.build_on_land(player.id, choice)
-            else:
-                if player.bot_strategy == "conservative" and self.state.loans.get(player.id):
-                    self._log_bot_decision(player, "skip build: loan risk, sale review preferred")
-                self.decline_pending_action(player.id)
-        if pending["type"] == "purchase_special":
-            special_id = pending["special_region_id"]
-            current_value = self.state.special_values.get(special_id, pending["price_won"])
-            risk_margin = 0.40 if player.bot_strategy == "conservative" else 0.15
-            if player.cash_won - pending["price_won"] >= int(player.cash_won * self._bot_reserve_ratio(player)) and current_value >= int(pending["price_won"] * (1 - risk_margin)):
-                self._log_bot_decision(player, f"buy special {special_id} price={pending['price_won']} current={current_value}")
-                self.purchase_special_region(player.id)
-            else:
-                self._log_bot_decision(player, f"skip special {special_id}: forced sale risk")
-                self.decline_pending_action(player.id)
-
-    def _bot_should_buy_land(self, player, price):
-        if player.cash_won < 0:
-            return False
-        reserve = self._bot_reserve_ratio(player)
-        if self.state.loans.get(player.id):
-            reserve += 0.20
-        return player.cash_won - price >= int(player.cash_won * reserve)
-
-    def _bot_building_choice(self, player, region_id, available):
-        affordable = [
-            building_type
-            for building_type in available
-            if player.cash_won - self.data["building_prices"][region_id][building_type]
-            >= int(player.cash_won * self._bot_reserve_ratio(player))
-        ]
-        if player.cash_won < 0:
-            return None
-        if not affordable:
-            return None
-        if player.bot_strategy == "aggressive":
-            for item in ("mixed_use", "commercial", "industrial", "residential"):
-                if item in affordable:
-                    return item
-        if player.bot_strategy == "conservative":
-            for item in ("industrial", "residential", "commercial", "mixed_use"):
-                if item in affordable:
-                    return item
-        if player.bot_strategy == "random":
-            from random import choice
-
-            return choice(affordable)
-        for item in ("residential", "commercial", "industrial", "mixed_use"):
-            if item in affordable:
-                return item
-        return None
-
-    def _bot_reserve_ratio(self, player):
-        if player.bot_strategy == "aggressive":
-            return 0.10
-        if player.bot_strategy == "conservative":
-            return 0.45
-        if player.bot_strategy == "random":
-            return 0.20
-        return 0.25
-
-    def _bot_consider_asset_disposal(self, player):
-        if player.cash_won >= 0 and not self.state.loans.get(player.id):
-            return
-        for building in list(self.state.buildings):
-            if building["nominal_owner_id"] == player.id and self.data["board"][player.position].get("region_id") == building["region_id"]:
-                try:
-                    self._log_bot_decision(player, f"sell review {building['building_type']} loan_or_cash_risk")
-                    self.sell_building(player.id, building["id"])
-                except GameRuleError as exc:
-                    self._log_bot_decision(player, f"sell rejected: {exc}")
-                return
 
     def _log_bot_decision(self, player, message):
         self.state.bot_debug_log.append(

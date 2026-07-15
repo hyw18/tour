@@ -33,12 +33,17 @@
         <section class="info-zone">
           <div class="tab-strip" aria-label="상세 정보">
             <button class="tab-pill active" data-info-tab="arrival">칸</button>
+            <button class="tab-pill" data-info-tab="assets">자산</button>
             <button class="tab-pill" data-info-tab="events">이벤트</button>
             <button class="tab-pill" data-info-tab="settlement">정산</button>
+            <button class="tab-pill" data-info-tab="requests">요청</button>
           </div>
           <article id="arrivalPanel" class="dealer-card info-panel"></article>
+          <article id="assetPanel" class="dealer-card info-panel compact-hidden"></article>
           <article id="eventPanel" class="dealer-card info-panel compact-hidden"></article>
           <article id="settlementPanel" class="dealer-card info-panel compact-hidden"></article>
+          <article id="requestPanel" class="dealer-card info-panel compact-hidden"></article>
+          <article id="managementPanel" class="dealer-card info-panel management-panel" hidden></article>
         </section>
 
         <aside class="command-zone">
@@ -49,6 +54,7 @@
           </div>
           <div class="actions command-grid">
             <button id="purchaseLand">토지 구매</button>
+            <button id="purchaseSpecial">특수지역 구매</button>
             <button id="declineAction">포기</button>
             <select id="buildingType">
               <option value="residential">주거</option>
@@ -57,9 +63,11 @@
               <option value="mixed_use">복합</option>
             </select>
             <button id="build">건설</button>
-            <button id="manageAction" hidden aria-hidden="true">관리</button>
-            <button id="tradeAction" hidden aria-hidden="true">거래</button>
+            <button id="manageAction">관리</button>
+            <button id="tradeAction">거래</button>
+            <button id="reviveAction">부활</button>
           </div>
+          <div id="actionMessage" class="action-message" role="status"></div>
         </aside>
       </section>
 

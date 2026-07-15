@@ -558,7 +558,7 @@ document.querySelectorAll("[data-dev]").forEach((button) => {
       region_id: document.querySelector("#targetRegionId").value,
       building_type: document.querySelector("#targetBuildingType").value
     });
-    if (action === "sell-building") await postJson("/api/sell-building", {
+    if (action === "sell-building") await postJson("/api/dev/sell-building", {
       player_id: document.querySelector("#targetPlayerId").value,
       building_id: document.querySelector("#targetBuildingId").value
     });
