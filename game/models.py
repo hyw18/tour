@@ -100,6 +100,9 @@ class GameState:
     last_dice: int | None = None
     last_roll: dict | None = None
     economic_actions: list = field(default_factory=list)
+    economic_sequence: int = 0
+    economic_animation_cursors: dict[str, int] = field(default_factory=dict)
+    domain_events: list = field(default_factory=list)
     last_activity_player_id: str | None = None
     processed_keys: dict[str, dict] = field(default_factory=dict)
     reconnect_token_hashes: dict[str, str] = field(default_factory=dict)
@@ -168,6 +171,9 @@ class GameState:
         self.last_dice = None
         self.last_roll = None
         self.economic_actions.clear()
+        self.economic_sequence = 0
+        self.economic_animation_cursors.clear()
+        self.domain_events.clear()
         self.last_activity_player_id = None
         self.processed_keys.clear()
         self.reconnect_token_hashes.clear()

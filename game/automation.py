@@ -36,8 +36,16 @@ class AutomationWorker:
     def tick(self) -> None:
         def advance_and_version():
             before = self.engine.automation_revision_marker()
+            economic_before = self.engine.economic_snapshot()
+            current = self.engine.current_player()
             self.engine.advance_automation(force=True)
             if self.engine.automation_revision_marker() != before:
+                self.engine.record_economic_action(
+                    None,
+                    current.id if current else None,
+                    economic_before,
+                    {"source": "automation"},
+                )
                 self.engine.mark_state_changed()
 
         self.engine.run_serialized(advance_and_version)

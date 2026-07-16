@@ -1,6 +1,6 @@
 # 플레이어 기능 연결 조사
 
-분석 기준 HEAD는 `dbf54825042eb60dfa877c7461762718024e9118`이다. 이 문서는
+분석 기준 HEAD는 `bd3d295fc1eb7eecb668492f6aa5f2e8c34619e2`이다. 이 문서는
 `game/routes.py`, `game/engine.py`, `templates/player.html`, `static/js/player.js`,
 `game/bots.py`를 실제 테스트와 함께 대조한 결과를 기록한다.
 
@@ -38,7 +38,7 @@
 | 공개·개인 revision | MULTI_CLIENT_TESTED | 단일 잠금 통합 API와 동일 state_version |
 | 부분 보드 갱신 | UNIT_TESTED | 40칸 최초 생성 후 클래스·텍스트·말만 갱신 |
 | 적응형 폴링 | UNIT_TESTED | 중복 방지, AbortController, visibility/pageshow 처리 |
-| 실제 스마트폰 2~4대 | MANUAL_DEVICE_TEST_REQUIRED | 현재 실행 환경에서 물리 기기 검증 불가 |
+| 실제 스마트폰 2~4대 | REAL_DEVICE_TEST_REQUIRED | 현재 실행 환경에서 물리 기기 검증 불가 |
 
 ## 주사위·이벤트 화면 연출
 
@@ -49,7 +49,22 @@
 | 이벤트 occurrence·노출 범위 | UNIT_TESTED | 동일 카드 반복, 개인·지역·전국, 연쇄 순서 검증 |
 | 이벤트 확인 큐·중복 방지 | UNIT_TESTED | occurrence 단위 확인과 재표시 차단 |
 | reduced motion·건너뛰기 | UNIT_TESTED | 정적 UI 계약과 JavaScript 문법 검증 |
-| 실제 모바일 애니메이션 | MANUAL_DEVICE_TEST_REQUIRED | Android Chrome·Samsung Internet·iOS Safari 필요 |
+| 실제 모바일 애니메이션 | REAL_DEVICE_TEST_REQUIRED | Android Chrome·Samsung Internet·iOS Safari 필요 |
+
+## 최신 확인·경제 UI 감사
+
+| 항목 | 상태 | 근거 |
+|---|---|---|
+| 일반토지·특수지역 구매 확인 | UNIT_TESTED | POST 전 공통 확인과 서버 state_version 재검증 |
+| 건물 건설 접근성 | UNIT_TESTED | dialog/label, 안전 버튼 초기 포커스, focus trap, Esc·뒤로가기, 포커스 복원 |
+| 건물 매각·운영권 양도·권한 회수 강한 확인 | UNIT_TESTED | 대상·금액·잔액·권리 변경·비가역성 표시 |
+| 거래 수락·파산 토지 인수·부활 확인 | UNIT_TESTED | 수락/인수/부활만 확인 후 POST, 거절·포기는 즉시 처리 |
+| 거래 상태와 경제 성립 분리 | UNIT_TESTED | proposed/accepted/rejected/expired domain event; 변화 없으면 경제 action 없음 |
+| 경제 action 초기 경계 | UNIT_TESTED | 서버 sequence/cursor/unread, 새 입장 기준선, 재접속 요약 후 생략 정책 |
+| 관련 자산 강조 | UNIT_TESTED | region/building/special/finance/refund data 식별자 사용 |
+| 이벤트 탭 | UNIT_TESTED | 서버 제목·대상·phase·진행률·현재/최대 효과 사용, 내부 ID 미표시 |
+| 최근 수익·지출 | UNIT_TESTED | 중앙 display_name, 라운드·턴·지역·상대·건물 메타데이터 |
+| 실제 브라우저 포커스·레이아웃 | REAL_DEVICE_TEST_REQUIRED | Chromium `libnspr4.so` 부재 및 물리 기기 미연결 |
 
 ## 경계 규칙 확인
 

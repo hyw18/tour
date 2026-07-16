@@ -1,8 +1,12 @@
 # 규칙 구현·테스트 대응표
 
-분석 기준 HEAD: `dbf54825042eb60dfa877c7461762718024e9118`
+분석 기준 HEAD: `bd3d295fc1eb7eecb668492f6aa5f2e8c34619e2`
 기준 `rules_version`: `2026.07.16.1`
-판정 시점: 2026-07-16. 최신 코드와 172개 통과 테스트를 다시 대조한 결과다.
+판정 시점: 2026-07-16. 최신 작업 트리의 194개 통과 테스트를 다시 대조한 결과다.
+
+검증 상태는 `CODE_PRESENT`, `UNIT_TESTED`, `MULTI_CLIENT_TESTED`,
+`BROWSER_TESTED`, `REAL_DEVICE_TEST_REQUIRED`, `CONFLICT`, `UNRESOLVED`로 해석한다.
+이번 환경에서는 실제 Chromium이 시작되지 않아 어떤 규칙에도 `BROWSER_TESTED`를 새로 부여하지 않았다.
 
 | MATCH | PARTIAL | MISSING | CONFLICT | UNRESOLVED | 합계 |
 |---:|---:|---:|---:|---:|---:|

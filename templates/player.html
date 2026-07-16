@@ -13,42 +13,48 @@
     </div>
 
     <main class="player-table landscape-game" aria-live="polite">
-      <p class="rule-pending-notice">규칙 결정 대기: 미개발 토지세 0.5%p · 이벤트 카드 공식 승인 · 복합 건물 최종 정산가</p>
       <header class="player-topbar">
         <form id="joinForm" class="join-form">
           <input id="nickname" placeholder="닉네임" autocomplete="nickname">
           <button>입장</button>
         </form>
-        <div id="playerBadge" class="badge">입장 전</div>
-        <div id="turnTitle" class="turn-title">대기 중</div>
+        <section class="topbar-player" aria-label="플레이어 상태">
+          <div id="playerBadge" class="player-identity">입장 전</div>
+          <div id="turnTitle" class="turn-title">대기 중</div>
+        </section>
+        <section class="topbar-core" aria-label="현재 현금과 주요 안내">
+          <span>현재 현금</span>
+          <strong id="topbarCash" data-current-cash>—</strong>
+          <small id="mainGuide">게임 입장을 기다리고 있습니다.</small>
+        </section>
+        <section class="topbar-session" aria-label="라운드와 턴 시간">
+          <div><strong id="roundStatus">R— / —</strong><span id="turnTimer">시간 제한 없음</span></div>
+          <button id="openRankings" type="button">순위표</button>
+          <button id="openFinance" type="button">자산·재무</button>
+        </section>
       </header>
+      <p class="rule-pending-notice topbar-rule-notice">규칙 결정 대기: 미개발 토지세 0.5%p · 이벤트 카드 공식 승인 · 복합 건물 최종 정산가</p>
 
       <section class="player-layout">
         <section class="board-zone">
           <div class="table-rail">
             <div id="boardGrid" class="board-grid" aria-label="40칸 보드"></div>
-            <div id="zoomCell" class="zoom-cell"></div>
           </div>
         </section>
 
         <section class="info-zone">
           <div class="tab-strip" aria-label="상세 정보">
             <button class="tab-pill active" data-info-tab="arrival">칸</button>
-            <button class="tab-pill" data-info-tab="assets">자산</button>
             <button class="tab-pill" data-info-tab="events">이벤트</button>
-            <button class="tab-pill" data-info-tab="settlement">정산</button>
             <button class="tab-pill" data-info-tab="requests">요청</button>
           </div>
-          <article id="arrivalPanel" class="dealer-card info-panel"></article>
-          <article id="assetPanel" class="dealer-card info-panel compact-hidden"></article>
+          <article id="arrivalPanel" class="dealer-card info-panel arrival-focus-card"></article>
           <article id="eventPanel" class="dealer-card info-panel compact-hidden"></article>
-          <article id="settlementPanel" class="dealer-card info-panel compact-hidden"></article>
           <article id="requestPanel" class="dealer-card info-panel compact-hidden"></article>
           <article id="managementPanel" class="dealer-card info-panel management-panel" hidden></article>
         </section>
 
         <aside class="command-zone">
-          <div id="playerState" class="meter-stack"></div>
           <div class="dice-dock">
             <button id="rollDice" class="primary-action">주사위</button>
             <button id="endTurn" class="primary-action ruby">턴 종료</button>
@@ -71,10 +77,10 @@
               <select id="animationPreference">
                 <option value="full">기본</option>
                 <option value="fast">빠르게</option>
-                <option value="minimal">최소화</option>
+                <option value="minimal">애니메이션 최소화</option>
               </select>
             </label>
-            <label class="sound-setting"><input id="animationMuted" type="checkbox" checked> 음소거</label>
+            <span class="sound-setting" title="효과음은 아직 구현되지 않았습니다.">효과음 준비 중</span>
           </div>
           <div id="actionMessage" class="action-message" role="status"></div>
         </aside>
@@ -82,14 +88,52 @@
 
       <div id="tradeModal" class="trade-modal" hidden></div>
 
+      <div id="rankingModal" class="panel-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="rankingTitle">
+        <section class="panel-dialog-card">
+          <header><h2 id="rankingTitle">전체 순위표</h2><button id="closeRankings" type="button">닫기</button></header>
+          <div id="rankingList" class="ranking-list" aria-live="polite">
+            <section id="rankedPlayers" class="ranking-group"><h3>공식 순위</h3><div id="rankedPlayerRows"></div></section>
+            <section id="unrankedPlayers" class="ranking-group" hidden><h3>순위 없음</h3><div id="unrankedPlayerRows"></div></section>
+          </div>
+        </section>
+      </div>
+
+      <div id="financeModal" class="panel-dialog finance-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="financeTitle">
+        <section class="panel-dialog-card">
+          <header><h2 id="financeTitle">자산·재무</h2><button id="closeFinance" type="button">닫기</button></header>
+          <nav class="finance-tabs" aria-label="자산·재무 항목">
+            <button class="active" type="button" data-finance-tab="assets">자산</button>
+            <button type="button" data-finance-tab="tax">세금·정산</button>
+            <button type="button" data-finance-tab="loan">대출</button>
+            <button type="button" data-finance-tab="history">최근 내역</button>
+          </nav>
+          <div id="financeScroll" class="panel-dialog-scroll">
+            <article id="assetPanel" class="finance-panel"></article>
+            <article id="settlementPanel" class="finance-panel" data-finance-pane="tax"></article>
+          </div>
+        </section>
+      </div>
+
       <div id="buildConfirmModal" class="confirm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="buildConfirmTitle">
         <section class="confirm-card">
           <h2 id="buildConfirmTitle">건물을 건설할까요?</h2>
           <div id="buildConfirmDetails"></div>
-          <p id="buildConfirmError" class="action-message error" role="alert"></p>
+          <p id="buildConfirmError" class="action-message error" role="alert" aria-live="assertive"></p>
           <div class="confirm-actions">
             <button id="cancelBuildConfirm" type="button">취소</button>
             <button id="confirmBuild" type="button" class="primary-action">건설 확정</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="actionConfirmModal" class="confirm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="actionConfirmTitle">
+        <section class="confirm-card">
+          <h2 id="actionConfirmTitle">행동을 확인하세요</h2>
+          <div id="actionConfirmDetails"></div>
+          <p id="actionConfirmError" class="action-message error" role="alert" aria-live="assertive"></p>
+          <div class="confirm-actions">
+            <button id="cancelActionConfirm" type="button">취소</button>
+            <button id="confirmAction" type="button" class="primary-action">확정</button>
           </div>
         </section>
       </div>
@@ -100,7 +144,7 @@
             <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
           </div>
           <strong id="diceResultText">주사위를 굴리는 중…</strong>
-          <button id="skipAnimation" type="button">애니메이션 건너뛰기</button>
+          <button id="skipAnimation" type="button">연출 건너뛰기</button>
         </section>
         <section id="eventReveal" class="animation-stage event-reveal" hidden role="dialog" aria-modal="true" aria-labelledby="eventRevealTitle">
           <article id="eventRevealCard" class="event-reveal-card">
@@ -115,8 +159,9 @@
             </div>
           </article>
           <div class="event-reveal-actions">
-            <button id="skipEventReveal" type="button">공개 연출 건너뛰기</button>
-            <button id="confirmEvent" type="button" class="primary-action">확인</button>
+            <span>카드 연출 중에도 서버 턴 제한시간은 계속 진행됩니다.</span>
+            <button id="skipEventReveal" type="button">카드 즉시 공개</button>
+            <button id="confirmEvent" type="button" class="primary-action">확인하고 닫기</button>
           </div>
         </section>
         <section id="economicStage" class="animation-stage economic-stage" hidden aria-live="polite" aria-label="경제 활동 결과">
@@ -124,7 +169,7 @@
           <strong id="economicAmount"></strong>
           <span id="economicReason"></span>
           <span id="economicTransfer"></span>
-          <button id="skipEconomicAnimation" type="button">전체 건너뛰기</button>
+          <button id="skipEconomicAnimation" type="button">연출 건너뛰기</button>
         </section>
       </div>
     </main>

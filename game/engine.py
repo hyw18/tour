@@ -52,6 +52,26 @@ class GameEngine:
         4: (207, 1000),
         5: (180, 1000),
     }
+    ECONOMIC_REASON_NAMES = {
+        "land_purchase": "토지 구매",
+        "special_region_purchase": "특수지역 구매",
+        "building_construction": "건설비",
+        "building_sale": "건물 매각",
+        "land_fee": "일반 토지 방문비용",
+        "building_visit_fee": "건물 방문료",
+        "lap_building_return": "산업·복합 수익",
+        "lap_building_loss": "산업·복합 손실",
+        "commercial_sale_refund": "상업 매각 환급",
+        "loan_repayment": "대출 상환",
+        "tax": "세금",
+        "start_bonus": "출발지 보너스",
+        "usage_change": "용도 변경 비용",
+        "operating_right_sale": "운영권 거래대금",
+        "operating_right_recall": "권한 회수 대금",
+        "land_trade_sale": "토지 거래대금",
+        "special_region_forced_sale": "특수지역 강제매각금",
+        "bankruptcy_takeover_declined_refund": "파산 외부 환급금",
+    }
 
     def __init__(self, data_dir):
         self.data_dir = data_dir
@@ -176,6 +196,25 @@ class GameEngine:
             return None
 
         sources = [item["reason"] for item in cash_changes]
+        if not action_type:
+            messages = [entry.get("message") for entry in self.state.game_log[before["log_index"]:]]
+            action_type = next(({
+                "land_purchased": "land_purchase",
+                "building_built": "building_purchase",
+                "building_sold": "building_sale",
+                "special_purchased": "special_region_purchase",
+                "land_trade_accepted": "land_trade_accepted",
+                "operating_right_accepted": "operating_right_accepted",
+                "usage_change_approved": "usage_change_approved",
+                "rights_recalled": "rights_recalled",
+                "special_forced_sale": "special_forced_sale",
+                "player_bankrupt": "bankruptcy_declared",
+            }.get(message) for message in reversed(messages) if message in {
+                "land_purchased", "building_built", "building_sold", "special_purchased",
+                "land_trade_accepted", "operating_right_accepted", "usage_change_approved",
+                "rights_recalled", "special_forced_sale", "player_bankrupt",
+            }), None)
+            action_type = action_type or "turn_economy"
         if action_type == "turn_economy":
             if len(set(sources)) == 1:
                 action_type = {
@@ -197,8 +236,10 @@ class GameEngine:
             )))
             related_players.update(change.get("ownership_chain_before", []))
             related_players.update(change.get("ownership_chain", []))
+        self.state.economic_sequence += 1
         action = {
-            "action_id": new_id("econ"),
+            "action_id": f"econ_{self.state.game_instance_id}_{self.state.economic_sequence}",
+            "sequence": self.state.economic_sequence,
             "action_type": action_type,
             "actor_player_id": actor_player_id,
             "related_player_ids": sorted(related_players),
@@ -213,6 +254,22 @@ class GameEngine:
         self.state.economic_actions.append(action)
         self.state.economic_actions = self.state.economic_actions[-100:]
         return deepcopy(action)
+
+    def domain_events_since(self, before, caused_by_action_id=None):
+        events = []
+        for entry in self.state.game_log[before["log_index"]:]:
+            if entry.get("category") in {"money", "bot"}:
+                continue
+            events.append({
+                "event_id": new_id("domain"),
+                "event_type": entry.get("message"),
+                "details": deepcopy(entry.get("details", {})),
+                "round": entry.get("round"),
+                "caused_by_action_id": caused_by_action_id,
+                "game_instance_id": self.state.game_instance_id,
+                "state_version": self.state.state_version + 1,
+            })
+        return events
 
     def automation_revision_marker(self):
         return (
@@ -253,6 +310,7 @@ class GameEngine:
         supplied = self._reconnect_token_hash(str(reconnect_token or ""))
         if not expected or not compare_digest(expected, supplied):
             raise PermissionError("invalid reconnect token")
+        self.state.economic_animation_cursors[player_id] = self.state.economic_sequence
         return player.public()
 
     def _reconnect_token_hash(self, token):
@@ -301,6 +359,7 @@ class GameEngine:
             join_order=self._human_join_order,
         )
         self.state.players.append(player)
+        self.state.economic_animation_cursors[player.id] = self.state.economic_sequence
         self._log("lobby", "player_joined", {"player_id": player.id, "nickname": player.nickname})
         return player.public()
 
@@ -816,6 +875,31 @@ class GameEngine:
             "occurrence_id": occurrence_id,
         }
 
+    def acknowledge_economic_actions(self, player_id, sequence):
+        player = self._find_player(player_id)
+        if not player:
+            raise GameRuleError("player not found")
+        try:
+            sequence = int(sequence)
+        except (TypeError, ValueError) as exc:
+            raise GameRuleError("economic sequence must be an integer") from exc
+        if sequence < 0 or sequence > self.state.economic_sequence:
+            raise GameRuleError("economic sequence is out of range")
+        visible = {
+            action["sequence"] for action in self.state.economic_actions
+            if player.id == action.get("actor_player_id")
+            or player.id in action.get("related_player_ids", [])
+            or any(change.get("type") in {
+                "building_added", "building_removed", "building_updated",
+                "land_owner_changed", "special_owner_changed",
+            } for change in action.get("asset_changes", []))
+        }
+        current = self.state.economic_animation_cursors.get(player.id, 0)
+        if sequence > current and sequence not in visible:
+            raise GameRuleError("economic action is not visible to player")
+        self.state.economic_animation_cursors[player.id] = max(current, sequence)
+        return {"animation_cursor": self.state.economic_animation_cursors[player.id]}
+
     def respond_land_takeover(self, player_id, accept):
         pending = self.state.pending_land_takeover
         if not pending:
@@ -1119,6 +1203,7 @@ class GameEngine:
         }
         self.state.turn_elapsed_before_pause = self.elapsed_turn_seconds()
         self.state.turn_started_at = None
+        self._log("request", "land_trade_proposed", {"requester_id": requester.id, "buyer_id": buyer.id, "region_id": region_id, "price_won": self.state.land_trade_offer["price_won"]})
         if buyer.is_bot:
             return self.respond_land_trade(buyer.id, self.bot_controller.accepts_land_trade(buyer, self.state.land_trade_offer))
         return self.public_state()
@@ -1136,12 +1221,14 @@ class GameEngine:
             raise GameRuleError("trade participant not found")
         if accept:
             self._execute_land_trade(requester, buyer, offer["region_id"], offer["price_won"])
+        self._log("request", "land_trade_accepted" if accept else "land_trade_rejected", deepcopy(offer))
         self.state.land_trade_offer = None
         self.state.turn_started_at = monotonic()
         return self.public_state()
 
     def expire_land_trade(self):
         if self.state.land_trade_offer and monotonic() - self.state.land_trade_offer["created_at"] >= self.state.land_trade_offer.get("timeout_seconds", 10):
+            self._log("request", "land_trade_expired", deepcopy(self.state.land_trade_offer))
             self.state.land_trade_offer = None
             self.state.turn_started_at = monotonic()
         return self.public_state()
@@ -1200,6 +1287,7 @@ class GameEngine:
         }
         self.state.turn_elapsed_before_pause = self.elapsed_turn_seconds()
         self.state.turn_started_at = None
+        self._log("request", "operating_right_proposed", {"requester_id": requester.id, "target_id": target.id, "building_id": building_id, "price_won": price_won})
         if target.is_bot:
             return self.respond_operating_right_transfer(target.id, self.bot_controller.accepts_operating_right(target, self.state.operating_right_offer))
         return self.public_state()
@@ -1230,6 +1318,7 @@ class GameEngine:
             self.rights_service.validate_chain(building, building["ownership_chain"])
             building["operator_id"] = building["ownership_chain"][-1]
             self.state.successful_build_edit_this_visit = True
+        self._log("request", "operating_right_accepted" if accept else "operating_right_rejected", deepcopy(offer))
         self.state.operating_right_offer = None
         self.state.turn_started_at = monotonic()
         return self.public_state()
@@ -1272,6 +1361,7 @@ class GameEngine:
             "timeout_seconds": 10,
             "blocked_key": key,
         }
+        self._log("request", "usage_change_requested", {"requester_id": requester.id, "building_id": building_id, "new_type": new_type, "cost_won": cost})
         for approver_id in approvers:
             approver = self._find_player(approver_id)
             forced = self.state.forced_approval_responses.get(approver_id)
@@ -1291,6 +1381,7 @@ class GameEngine:
             raise GameRuleError("player is not an approver")
         request["responses"][approver_id] = bool(approve)
         if approve is False:
+            self._log("request", "usage_change_rejected", {"approver_id": approver_id, "requester_id": request["requester_id"], "building_id": request["building_id"]})
             self.state.blocked_usage_change_requests.add(tuple(request["blocked_key"]))
             self.state.usage_change_request = None
             return self.public_state()
@@ -1334,6 +1425,7 @@ class GameEngine:
         self.rights_service.validate_chain(building, building["ownership_chain"])
         building["operator_id"] = building["ownership_chain"][-1]
         self.state.successful_build_edit_this_visit = True
+        self._log("request", "rights_recalled", {"requester_id": requester.id, "building_id": building["id"], "payout_won": payout, "recipient_id": recipient.id if recipient else None})
         return self.public_state()
 
     def force_approval_response(self, player_id, approve):
@@ -1547,6 +1639,33 @@ class GameEngine:
         state["special_region_details"] = self._special_region_details()
         state["active_events"] = [self._public_event_occurrence(event) for event in self.state.active_events]
         state["event_history"] = [self._public_event_occurrence(event) for event in self.state.event_history]
+        state["public_economic_actions"] = [
+            {
+                "action_id": action["action_id"],
+                "sequence": action["sequence"],
+                "action_type": action["action_type"],
+                "actor_player_id": action.get("actor_player_id"),
+                "asset_changes": [
+                    deepcopy(change) for change in action.get("asset_changes", [])
+                    if change.get("type") in {
+                        "building_added", "building_removed", "building_updated",
+                        "land_owner_changed", "special_owner_changed",
+                    }
+                ],
+                "cash_changes": [],
+                "game_instance_id": action["game_instance_id"],
+                "state_version": action["state_version"],
+                "region_id": action.get("region_id"),
+                "special_region_id": action.get("special_region_id"),
+                "building_id": action.get("building_id"),
+                "building_type": action.get("building_type"),
+            }
+            for action in self.state.economic_actions
+            if any(change.get("type") in {
+                "building_added", "building_removed", "building_updated",
+                "land_owner_changed", "special_owner_changed",
+            } for change in action.get("asset_changes", []))
+        ][-20:]
         state["rules_decisions_pending"] = deepcopy(self.rules["unresolved"])
         return state
 
@@ -1590,7 +1709,63 @@ class GameEngine:
         if scope != "personal":
             effects = occurrence.get("effects", definition.get("effects", []))
             base["effect_summary"] = occurrence.get("effect_summary") or self._event_effect_summary(effects)
+        if "age_rounds" in occurrence:
+            base.update(self._event_progress(occurrence))
+            if scope == "personal":
+                base.pop("current_effect_summary", None)
+                base.pop("maximum_effect_summary", None)
+                base["target_name"] = "개인"
         return base
+
+    def _event_progress(self, active):
+        age = int(active.get("age_rounds", 0))
+        duration = max(1, int(active.get("duration_rounds", 1)))
+        recovery = max(0, int(active.get("recovery_rounds", 0)))
+        intensity = self._event_intensity_bps(active)
+        if age < duration:
+            phase = "growing"
+            progress = min(10_000, int(age * 10_000 / duration))
+        elif age == duration:
+            phase = "peak"
+            progress = 10_000
+        elif age <= duration + recovery:
+            phase = "recovering"
+            progress = min(10_000, int((age - duration) * 10_000 / max(1, recovery)))
+        else:
+            phase = "completed"
+            progress = 10_000
+        current_effects = []
+        for effect in active.get("effects", []):
+            current = deepcopy(effect)
+            if current["operation"] == "multiply":
+                current["value_bps"] = 10_000 + apply_rate(current["value_bps"] - 10_000, intensity, 10_000)
+            else:
+                current["value_bps"] = apply_rate(current["value_bps"], intensity, 10_000)
+            current_effects.append(current)
+        definition = self._event_definition(active.get("id")) or {}
+        target_name = "전체 플레이어"
+        if active.get("scope") == "regional" and active.get("region_id"):
+            target_name = self.region_by_id(active["region_id"])["name"]
+        elif active.get("scope") == "personal":
+            target = self._find_player(active.get("player_id"))
+            target_name = target.nickname if target else "개인"
+        return {
+            "title": definition.get("title", active.get("title", "이벤트")),
+            "description": definition.get("public_description", ""),
+            "target_name": target_name,
+            "phase": phase,
+            "phase_progress_bps": progress,
+            "rounds_remaining": max(0, duration + recovery - age),
+            "current_effect_summary": self._event_effect_summary(current_effects),
+            "maximum_effect_summary": self._event_effect_summary(active.get("effects", [])),
+        }
+
+    def _private_active_event(self, active, player):
+        item = self._public_event_occurrence(active)
+        item.update(self._event_progress(active))
+        definition = self._event_definition(active.get("id")) or {}
+        item["description"] = definition.get("private_description") or definition.get("public_description", "")
+        return item
 
     def _visible_event_occurrences(self, player):
         visible = []
@@ -1675,6 +1850,12 @@ class GameEngine:
                 "can_accept": player.cash_won >= pending["land_price_won"],
                 "response_rule": "auto_reject",
             }
+        animation_cursor = self.state.economic_animation_cursors.get(player.id, self.state.economic_sequence)
+        visible_economic_actions = [
+            self._private_economic_action(action, player.id)
+            for action in self.state.economic_actions
+            if player.id == action.get("actor_player_id") or player.id in action.get("related_player_ids", [])
+        ]
         return {
             "game_instance_id": self.state.game_instance_id,
             "state_version": self.state.state_version,
@@ -1698,7 +1879,7 @@ class GameEngine:
             "recent_income": deepcopy(ledger.get("income_entries", [])[-10:]),
             "recent_expenses": deepcopy(ledger.get("expense_entries", [])[-10:]),
             "active_events": [
-                deepcopy(event)
+                self._private_active_event(event, player)
                 for event in self.state.active_events
                 if event.get("player_id") in {None, player.id}
             ],
@@ -1708,11 +1889,14 @@ class GameEngine:
                 for occurrence in self._visible_event_occurrences(player)
                 if occurrence["occurrence_id"] not in self.state.event_acknowledged_occurrences.get(player.id, set())
             ],
-            "economic_actions": [
-                self._private_economic_action(action, player.id)
-                for action in self.state.economic_actions
-                if player.id == action.get("actor_player_id") or player.id in action.get("related_player_ids", [])
-            ][-50:],
+            "latest_economic_sequence": self.state.economic_sequence,
+            "animation_cursor": animation_cursor,
+            "unread_economic_actions": [action for action in visible_economic_actions if action["sequence"] > animation_cursor],
+            "economic_actions": visible_economic_actions[-50:],
+            "recent_domain_events": [
+                deepcopy(event) for event in self.state.domain_events
+                if player.id in event.get("details", {}).values()
+            ][-20:],
         }
 
     def _turn_remaining_seconds(self):
@@ -2286,9 +2470,9 @@ class GameEngine:
         owner = self._find_player(owner_id)
         fee = apply_rate_rounded_50k(self.region_by_id(region_id)["land_price"], 5, 100)
         visitor.cash_won -= fee
-        self._add_expense(visitor, fee, "land_fee", region_id)
+        self._add_expense(visitor, fee, "land_fee", region_id, counterparty_player_id=owner_id)
         if owner:
-            self.loan_service.deposit(owner, fee, "land_fee", taxable=True, region_id=region_id, building_type="land")
+            self.loan_service.deposit(owner, fee, "land_fee", taxable=True, region_id=region_id, building_type="land", counterparty_player_id=visitor.id)
         self._log("fee", "land_fee_paid", {"visitor_id": visitor.id, "owner_id": owner_id, "region_id": region_id, "amount_won": fee})
 
     def _pay_building_visit_fees(self, visitor, region_id):
@@ -2305,8 +2489,8 @@ class GameEngine:
             if fee <= 0:
                 continue
             visitor.cash_won -= fee
-            self._add_expense(visitor, fee, "building_visit_fee", region_id, building["id"])
-            self.loan_service.deposit(operator, fee, "building_visit_fee", taxable=True, region_id=region_id, building_type=building["building_type"], building_id=building["id"])
+            self._add_expense(visitor, fee, "building_visit_fee", region_id, building["id"], operator.id)
+            self.loan_service.deposit(operator, fee, "building_visit_fee", taxable=True, region_id=region_id, building_type=building["building_type"], building_id=building["id"], counterparty_player_id=visitor.id)
             self._log("fee", "building_visit_fee_paid", {"visitor_id": visitor.id, "operator_id": operator.id, "building_id": building["id"], "amount_won": fee})
             paid_any = True
         return paid_any
@@ -2463,6 +2647,7 @@ class GameEngine:
 
     def expire_operating_right_offer(self):
         if self.state.operating_right_offer and monotonic() - self.state.operating_right_offer["created_at"] >= self.state.operating_right_offer.get("timeout_seconds", 10):
+            self._log("request", "operating_right_expired", deepcopy(self.state.operating_right_offer))
             self.state.operating_right_offer = None
             self.state.turn_started_at = monotonic()
         return self.public_state()
@@ -2491,6 +2676,7 @@ class GameEngine:
         self.rights_service.validate_chain(building, building["ownership_chain"])
         building["operator_id"] = building["ownership_chain"][-1]
         self.state.successful_build_edit_this_visit = True
+        self._log("request", "usage_change_approved", {"requester_id": requester.id, "building_id": building["id"], "new_type": building["building_type"], "cost_won": request["cost_won"]})
         self.state.usage_change_request = None
 
     def _validate_land_trade(self, requester, buyer, region_id):
@@ -2563,22 +2749,32 @@ class GameEngine:
         }
         settlement["steps"].append("1. industrial_and_mixed_income_loss")
         self._settle_lap_building_returns(player, ledger)
+        self._log("settlement", "lap_income_and_loss", {"player_id": player.id, "income_entries": deepcopy(ledger["income_entries"]), "losses_won": ledger["losses"]})
         settlement["steps"].append("2. taxable_income_fixed")
         ledger["taxable_income"] = max(0, ledger["gross_income"] - ledger["losses"])
+        self._log("settlement", "taxable_income_fixed", {"player_id": player.id, "taxable_income_won": ledger["taxable_income"]})
         settlement["steps"].append("3. tax_notice_and_payment")
         ledger["tax_rate"] = self._calculate_tax_rate_bps(player)
         ledger["tax_due"] = round_to_50k(apply_rate(ledger["taxable_income"], ledger["tax_rate"], 10_000))
         player.cash_won -= ledger["tax_due"]
         if ledger["tax_due"]:
             self._add_expense(player, ledger["tax_due"], "tax", None)
+        self._log("settlement", "tax_paid", {"player_id": player.id, "amount_won": ledger["tax_due"]})
         settlement["steps"].append("4. non_taxable_start_bonus")
         ledger["start_bonus"] = START_BONUS_WON
         self.loan_service.deposit(player, START_BONUS_WON, "start_bonus", taxable=False, record=False)
         ledger["income_entries"].append(
-            {"source": "start_bonus", "amount_won": START_BONUS_WON, "taxable": False}
+            {
+                "source": "start_bonus", "display_name": self.ECONOMIC_REASON_NAMES["start_bonus"],
+                "amount_won": START_BONUS_WON, "taxable": False,
+                "round": self.state.global_round, "turn_sequence": self.state.turn_sequence,
+                "region_id": None, "building_id": None, "counterparty_player_id": None,
+            }
         )
+        self._log("settlement", "start_bonus_received", {"player_id": player.id, "amount_won": START_BONUS_WON})
         settlement["steps"].append("5. existing_loan_auto_payment")
         ledger["loan_payment"] += self._auto_repay_loan(player, player.cash_won)
+        self._log("settlement", "loan_repaid", {"player_id": player.id, "amount_won": ledger["loan_payment"]})
         settlement["steps"].append("6. new_loan_decision")
         if player.cash_won < 0 and player.status != "bankrupt":
             if player.id in self.state.loans and self.state.loans[player.id]["remaining_due_won"] > 0:
@@ -2586,12 +2782,15 @@ class GameEngine:
             else:
                 needed = -player.cash_won
                 self._create_emergency_loan(player, needed, "start_settlement")
+        self._log("settlement", "loan_decision_completed", {"player_id": player.id, "loan": deepcopy(self.state.loans.get(player.id))})
         settlement["steps"].append("7. limit_maturity_bankruptcy")
         self._check_loan_maturity(player)
+        self._log("settlement", "bankruptcy_check_completed", {"player_id": player.id, "status": player.status})
         settlement["steps"].append("8. settlement_created")
         settlement["ledger"] = deepcopy(self._ledger(player))
         settlement["cash_after"] = player.cash_won
         settlement["status_after"] = player.status
+        self._log("settlement", "final_cash_confirmed", {"player_id": player.id, "cash_won": player.cash_won})
         self.state.last_settlement = settlement
         settlement["steps"].append("9. ready_for_turn_end")
         self._ledger(player)["closed"] = True
@@ -2677,7 +2876,7 @@ class GameEngine:
             return self._new_lap_ledger(player)
         return ledger
 
-    def _add_income(self, player, amount, source, region_id=None, taxable=True, building_type=None, building_id=None):
+    def _add_income(self, player, amount, source, region_id=None, taxable=True, building_type=None, building_id=None, counterparty_player_id=None):
         ledger = self._open_ledger(player)
         entry = {
             "source": source,
@@ -2686,6 +2885,10 @@ class GameEngine:
             "region_id": region_id,
             "building_type": building_type,
             "building_id": building_id,
+            "counterparty_player_id": counterparty_player_id,
+            "display_name": self.ECONOMIC_REASON_NAMES.get(source, source),
+            "round": self.state.global_round,
+            "turn_sequence": self.state.turn_sequence,
         }
         ledger["income_entries"].append(entry)
         ledger["gross_income"] += int(amount)
@@ -2693,7 +2896,7 @@ class GameEngine:
             ledger["taxable_income"] += int(amount)
         self._log("money", "income_recorded", {"player_id": player.id, "source": source, "amount_won": int(amount), "taxable": bool(taxable)})
 
-    def _add_expense(self, player, amount, source, region_id=None, building_id=None):
+    def _add_expense(self, player, amount, source, region_id=None, building_id=None, counterparty_player_id=None):
         ledger = self._open_ledger(player)
         ledger["expense_entries"].append(
             {
@@ -2701,6 +2904,10 @@ class GameEngine:
                 "amount_won": int(amount),
                 "region_id": region_id,
                 "building_id": building_id,
+                "counterparty_player_id": counterparty_player_id,
+                "display_name": self.ECONOMIC_REASON_NAMES.get(source, source),
+                "round": self.state.global_round,
+                "turn_sequence": self.state.turn_sequence,
             }
         )
         self._log("money", "expense_recorded", {"player_id": player.id, "source": source, "amount_won": int(amount)})
@@ -3161,15 +3368,23 @@ class GameEngine:
             self.state.asset_history.setdefault(player_id, []).append({"global_round": self.state.global_round, "total_asset_won": total})
 
     def _log(self, category, message, details=None):
+        details = deepcopy(details or {})
         self.state.game_log.append(
             {
                 "round": self.state.global_round,
                 "category": category,
                 "message": message,
-                "details": deepcopy(details or {}),
+                "details": details,
             }
         )
         self.state.game_log = self.state.game_log[-1000:]
+        if category == "request":
+            self.state.domain_events.append({
+                "event_id": new_id("domain"), "event_type": message, "details": deepcopy(details),
+                "round": self.state.global_round, "game_instance_id": self.state.game_instance_id,
+                "state_version": self.state.state_version + 1,
+            })
+            self.state.domain_events = self.state.domain_events[-200:]
 
     def _log_bot_decision(self, player, message):
         self.state.bot_debug_log.append(

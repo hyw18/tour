@@ -2,12 +2,12 @@ class LoanService:
     def __init__(self, engine):
         self.engine = engine
 
-    def deposit(self, player, amount, source, *, taxable=True, region_id=None, building_type=None, building_id=None, record=True):
+    def deposit(self, player, amount, source, *, taxable=True, region_id=None, building_type=None, building_id=None, counterparty_player_id=None, record=True):
         amount = int(amount)
         if amount < 0:
             raise ValueError("deposit amount cannot be negative")
         if record:
-            self.engine._add_income(player, amount, source, region_id, taxable, building_type, building_id)
+            self.engine._add_income(player, amount, source, region_id, taxable, building_type, building_id, counterparty_player_id)
         player.cash_won += amount
         payment = self.engine._auto_repay_loan(player, amount)
         if payment:

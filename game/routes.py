@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from functools import wraps
 
 from flask import Blueprint, Response, abort, current_app, jsonify, render_template, request, session
@@ -9,6 +10,7 @@ from .engine import GameRuleError, IdempotencyConflict
 
 bp = Blueprint("game", __name__)
 dev_bp = Blueprint("development", __name__)
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 class PermissionDenied(GameRuleError):
@@ -47,29 +49,16 @@ def json_error(message, status=400):
     return jsonify({"error": message}), status
 
 
-ECONOMIC_ACTION_TYPES = {
-    "/api/roll": "turn_economy",
-    "/api/purchase-land": "land_purchase",
-    "/api/build": "building_purchase",
-    "/api/sell-building": "building_sale",
-    "/api/purchase-special": "special_region_purchase",
-    "/api/trade/land/propose": "land_trade",
-    "/api/trade/land/respond": "land_trade",
-    "/api/operating-right/transfer/propose": "operating_right_trade",
-    "/api/operating-right/transfer/respond": "operating_right_trade",
-    "/api/usage-change/request": "usage_change",
-    "/api/usage-change/respond": "usage_change",
-    "/api/operating-right/recall": "operating_right_recall",
-    "/api/event/trigger": "event_cash_change",
-    "/api/bankruptcy/takeover/respond": "bankruptcy_refund",
-    "/api/revive": "revival",
-}
-
-
 def boolean_field(payload, name):
     value = payload.get(name)
     if not isinstance(value, bool):
         raise GameRuleError(f"{name} must be boolean")
+    return value
+
+
+def validate_idempotency_key(value):
+    if not value or not IDEMPOTENCY_KEY_PATTERN.fullmatch(value):
+        raise GameRuleError("Idempotency-Key must be 1..128 characters using letters, numbers, '.', '_', ':', or '-'")
     return value
 
 
@@ -79,6 +68,7 @@ def mutating_route(handler=None, *, allow_ended=False, bump_state=True, record_a
         def wrapper(*args, **kwargs):
             key = request.headers.get("Idempotency-Key")
             try:
+                key = validate_idempotency_key(key)
                 request_instance_id = request.headers.get("X-Game-Instance-Id")
                 scope_instance_id = request_instance_id or engine().state.game_instance_id
                 scoped_key = f"{scope_instance_id}:{request.path}:{key}" if key else key
@@ -89,24 +79,26 @@ def mutating_route(handler=None, *, allow_ended=False, bump_state=True, record_a
                         raise PhaseConflict("previous game instance has expired")
                     if engine().state.ended and not allow_ended:
                         raise PhaseConflict("current phase does not allow this action")
-                    action_type = ECONOMIC_ACTION_TYPES.get(request.path)
-                    before = engine().economic_snapshot() if action_type else None
+                    if isinstance(payload, dict) and payload.get("expected_state_version") is not None:
+                        if payload["expected_state_version"] != engine().state.state_version:
+                            raise PhaseConflict("game state changed; review the latest confirmation details")
+                    before = engine().economic_snapshot()
                     pending_before = dict(engine().state.pending_action or {})
                     result = route_handler(*args, **kwargs)
                     if record_activity:
                         record_authenticated_activity(payload)
                     economic_action = None
-                    if action_type:
-                        actor_player_id = None
-                        if isinstance(payload, dict):
-                            actor_player_id = payload.get("player_id") or payload.get("requester_id") or payload.get("responder_id") or payload.get("approver_id")
-                        context = {
-                            "region_id": (payload or {}).get("region_id") or pending_before.get("region_id"),
-                            "special_region_id": pending_before.get("special_region_id"),
-                            "building_id": (payload or {}).get("building_id"),
-                            "building_type": (payload or {}).get("building_type"),
-                        }
-                        economic_action = engine().record_economic_action(action_type, actor_player_id, before, {key: value for key, value in context.items() if value is not None})
+                    actor_player_id = None
+                    if isinstance(payload, dict):
+                        actor_player_id = payload.get("player_id") or payload.get("requester_id") or payload.get("responder_id") or payload.get("approver_id")
+                    context = {
+                        "region_id": (payload or {}).get("region_id") or pending_before.get("region_id"),
+                        "special_region_id": pending_before.get("special_region_id"),
+                        "building_id": (payload or {}).get("building_id"),
+                        "building_type": (payload or {}).get("building_type"),
+                    }
+                    economic_action = engine().record_economic_action(None, actor_player_id, before, {key: value for key, value in context.items() if value is not None})
+                    result_events = engine().domain_events_since(before, scoped_key)
                     if bump_state:
                         engine().mark_state_changed()
                     if isinstance(result, dict):
@@ -115,6 +107,10 @@ def mutating_route(handler=None, *, allow_ended=False, bump_state=True, record_a
                         if economic_action:
                             economic_action["state_version"] = engine().state.state_version
                             result["economic_action"] = economic_action
+                        if result_events:
+                            for event in result_events:
+                                event["state_version"] = engine().state.state_version
+                            result["result_events"] = result_events
                     return result
 
                 return jsonify(engine().with_idempotency(scoped_key, execute, signature))
@@ -488,6 +484,15 @@ def api_event_acknowledge():
         payload.get("last_seen_event_version", payload.get("event_version")),
         payload.get("occurrence_id"),
     )
+
+
+@bp.post("/api/economic/acknowledge")
+@mutating_route(bump_state=False, record_activity=False, allow_ended=True)
+def api_economic_acknowledge():
+    payload = request.get_json(force=True, silent=True) or {}
+    player_id = payload.get("player_id")
+    require_player(player_id)
+    return engine().acknowledge_economic_actions(player_id, payload.get("sequence"))
 
 
 @bp.post("/api/event/trigger")

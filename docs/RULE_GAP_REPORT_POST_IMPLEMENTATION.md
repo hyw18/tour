@@ -1,36 +1,39 @@
-# 최신 HEAD 안정화 후 검증 보고서
+# 최신 HEAD 보완 후 검증 보고서
 
-- 분석 기준 HEAD: `dbf54825042eb60dfa877c7461762718024e9118`
+- 분석 기준 HEAD: `bd3d295fc1eb7eecb668492f6aa5f2e8c34619e2`
 - 검증일: 2026-07-16
 - 공식 규칙 버전: `2026.07.16.1`
 
 ## 검증 상태
 
-| 기능 | 상태 | 근거 |
+| 기능 | 상태 | 최신 작업 트리 근거 |
 |---|---|---|
-| 모든 게임 상태 변경 API 멱등 키 필수 | MULTI_CLIENT_TESTED | 누락 400, payload 충돌 409, 게임 인스턴스 범위 테스트 |
-| 100회 동시 주사위·구매·건설·거래 수락 | MULTI_CLIENT_TESTED | 각 상태 변경 1회 |
-| 세션 쿠키 손실 후 캐릭터 복구 | MULTI_CLIENT_TESTED | 별도 Flask 세션에서 위치·토지 유지 확인 |
-| 공개·개인 동일 revision | MULTI_CLIENT_TESTED | 잠금 내 통합 `/api/player/<id>/state` |
-| 실패·위조·중복 활동 제외 | MULTI_CLIENT_TESTED | no-action 카운터 불변 확인 |
-| 이벤트 확인 1회 | MULTI_CLIENT_TESTED | event_version 재확인·재전송 차단 |
-| 4개 세션 30라운드 | MULTI_CLIENT_TESTED | 120턴, 서버 500 없음 |
-| 부분 보드 갱신·적응형 폴링 | UNIT_TESTED | 정적 연결 및 JavaScript 문법 컴파일 |
-| Chromium 실제 동작 | MANUAL_DEVICE_TEST_REQUIRED | 시스템 라이브러리 `libnspr4.so` 부재 |
+| 멱등 키 누락·공백·길이·문자 거부 | UNIT_TESTED | `tests/test_latest_head_audit.py` |
+| 동일 논리 요청 네트워크 재시도 키 유지 | UNIT_TESTED | 공통 `postJson` 계약 검사 |
+| 동일 키 100회·payload 충돌·게임별 범위 | MULTI_CLIENT_TESTED | `tests/test_multiclient_stability.py` 재실행 |
+| 건설 및 위험 행동 확인 단계 | UNIT_TESTED | 공통 모달·상태 버전·focus trap 계약 |
+| 거래 제안·수락·거절·만료 구분 | UNIT_TESTED | 엔진 request domain event와 무결제 거절 테스트 |
+| 출발지 정산 결과 순서 | UNIT_TESTED | 서버 settlement event 순서 테스트 |
+| 이벤트 제목·진행률·현재 효과 | UNIT_TESTED | 서버 계산값과 내부 ID 비노출 테스트 |
+| 경제 시퀀스·커서·재접속 생략 정책 | UNIT_TESTED | unread/ack/reconnect 경계 테스트 |
+| 관련 자산만 강조·삭제 흐림 | UNIT_TESTED | data 식별자와 선택자 계약 테스트 |
+| 실제 브라우저 UI | REAL_DEVICE_TEST_REQUIRED | Chromium 공유 라이브러리 부재 |
 
-## 실행 결과
+## 이번 실행 결과
 
-- 전체 pytest: `172 passed, 1 skipped`
-- Ruff: 통과
-- Python compileall: 통과
-- QuickJS 문법 컴파일: `common.js`, `host.js`, `player.js` 통과
-- 4봇 일반 300라운드 설정: 공식 조기 종료 조건으로 244라운드 종료, 오류 없음
-- 4봇 빠른 300라운드: 20회 완료
-- 일시중지·재개: 100회 완료
-- 새 게임 상태 교체: 20회 완료, 멱등 키와 재접속 해시 잔류 없음
+- `pytest -q`: `194 passed, 1 skipped`
+- `ruff check .`: 통과
+- `python -m compileall .`: 통과
+- `flask --app app routes`: 통과
+- `node --check static/js/*.js`: Node 실행 파일 부재로 실행 불가
+- QuickJS 대체 구문 컴파일: `common.js`, `host.js`, `player.js` 통과
+- `git diff --check`: 통과
+- Playwright: `libnspr4.so` 부재로 Chromium 시작 실패, BROWSER_TESTED로 표시하지 않음
 
-## 계속 남는 항목
+## 남은 검증
 
-- 실제 스마트폰 2~4대에서의 장시간 포커스·스크롤·회전 검증
-- Playwright 전체 시나리오와 브라우저 콘솔 오류 0 확인
+- 호스트 1개와 플레이어 4개 실제 브라우저 컨텍스트의 전체 시나리오
+- Android Chrome, Samsung Internet, iOS Safari/WebKit에서 모달 포커스·뒤로가기·회전
+- 네트워크 전환·백그라운드 복귀·300라운드 발열 및 프레임 저하
+- 자산 패널 스크롤 위치와 소프트 키보드 가림 여부
 - UNRESOLVED: TAX-005, EVENT-010, ASSET-006

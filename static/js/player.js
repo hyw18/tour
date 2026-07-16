@@ -5,6 +5,9 @@ let lastState = null;
 let lastPrivate = null;
 let activeInfoTab = "arrival";
 let selectedCellIndex = null;
+let lastArrivalPosition = null;
+let pendingArrivalFocus = null;
+let activeFinanceTab = "assets";
 let selectedBuildingId = null;
 let actionInFlight = false;
 let refreshInFlight = false;
@@ -28,7 +31,10 @@ const joinForm = $("#joinForm");
 const nickname = $("#nickname");
 const playerBadge = $("#playerBadge");
 const turnTitle = $("#turnTitle");
-const playerState = $("#playerState");
+const topbarCash = $("#topbarCash");
+const mainGuide = $("#mainGuide");
+const roundStatus = $("#roundStatus");
+const turnTimer = $("#turnTimer");
 const purchaseLand = $("#purchaseLand");
 const purchaseSpecial = $("#purchaseSpecial");
 const declineAction = $("#declineAction");
@@ -38,7 +44,6 @@ const manageAction = $("#manageAction");
 const tradeAction = $("#tradeAction");
 const reviveAction = $("#reviveAction");
 const boardGrid = $("#boardGrid");
-const zoomCell = $("#zoomCell");
 const arrivalPanel = $("#arrivalPanel");
 const assetPanel = $("#assetPanel");
 const eventPanel = $("#eventPanel");
@@ -46,6 +51,8 @@ const settlementPanel = $("#settlementPanel");
 const requestPanel = $("#requestPanel");
 const managementPanel = $("#managementPanel");
 const tradeModal = $("#tradeModal");
+const rankingModal = $("#rankingModal");
+const financeModal = $("#financeModal");
 const actionMessage = $("#actionMessage");
 const animationOverlay = $("#animationOverlay");
 const diceStage = $("#diceStage");
@@ -56,6 +63,7 @@ const economicStage = $("#economicStage");
 const animationPreference = $("#animationPreference");
 const buildConfirmModal = $("#buildConfirmModal");
 let activeBuildPreview = null;
+let buildConfirmationOrigin = null;
 let economicActionsInitialized = false;
 const queuedEconomicActionIds = new Set();
 
@@ -101,6 +109,7 @@ class AnimationSequenceController {
     this.processing = false;
     hideAnimationOverlay();
     renderActionState();
+    flushPendingArrivalFocus();
     renderedStateVersion = -1;
     scheduleRefresh(true);
   }
@@ -226,6 +235,7 @@ function buildingSummary(state, cell) {
 function playerChip(player) {
   const chip = document.createElement("span");
   chip.className = `chip ${player.id === playerId ? "mine" : ""} ${player.is_bot ? "bot-chip" : ""}`;
+  if (player.id === lastState?.current_turn_player_id) chip.classList.add("current-turn-chip");
   chip.dataset.playerId = player.id;
   chip.textContent = player.nickname.slice(0, 2);
   chip.title = `${player.nickname} · ${statusName(player.status)}`;
@@ -318,6 +328,7 @@ async function playMovementAnimation(result) {
 
 async function playDiceSequence(result) {
   try {
+    const previousPosition = lastPrivate?.player?.position ?? null;
     await playDiceAnimation(result);
     await playMovementAnimation(result);
   } finally {
@@ -487,10 +498,28 @@ async function playEconomicAction(action) {
     $("#economicReason").textContent = economicReasonNames[action.action_type] || action.action_type;
     await animationController.wait(animationDuration(600, 250));
   }
-  document.querySelectorAll(".asset-row").forEach((row) => row.classList.add("asset-change-highlight"));
+  const affectedRows = new Set();
+  (action.asset_changes || []).forEach((change) => {
+    const selectors = [];
+    if (change.building_id) selectors.push(`[data-building-id="${CSS.escape(change.building_id)}"]`);
+    if (change.region_id) selectors.push(`[data-region-id="${CSS.escape(change.region_id)}"]`);
+    if (change.special_region_id) selectors.push(`[data-special-region-id="${CSS.escape(change.special_region_id)}"]`);
+    if (change.type?.includes("loan")) selectors.push('[data-finance-section="loan"]');
+    if (change.type?.includes("refund")) selectors.push(`[data-refund-region-id="${CSS.escape(change.region_id || "")}"]`);
+    selectors.forEach((selector) => document.querySelectorAll(selector).forEach((row) => affectedRows.add(row)));
+  });
+  if ((action.cash_changes || []).some((change) => change.reason === "tax")) {
+    document.querySelectorAll('[data-finance-section="tax"]').forEach((row) => affectedRows.add(row));
+  }
+  affectedRows.forEach((row) => {
+    row.classList.add("asset-change-highlight");
+    if ((action.asset_changes || []).some((change) => change.type?.includes("removed") && change.building_id === row.dataset.buildingId)) {
+      row.classList.add("asset-removing");
+    }
+  });
   await animationController.wait(animationDuration(240, 80));
   highlighted?.classList.remove("economic-highlight");
-  document.querySelectorAll(".asset-change-highlight").forEach((row) => row.classList.remove("asset-change-highlight"));
+  affectedRows.forEach((row) => row.classList.remove("asset-change-highlight", "asset-removing"));
 }
 
 function enqueueEconomicAction(action) {
@@ -502,16 +531,23 @@ function enqueueEconomicAction(action) {
     finally {
       rememberEconomicAction(action.action_id);
       queuedEconomicActionIds.delete(action.action_id);
+      if (action.sequence != null) {
+        postJson("/api/economic/acknowledge", { player_id: playerId, sequence: action.sequence }, { retryCount: 1 })
+          .catch((error) => console.warn("Economic animation cursor was not acknowledged", error));
+      }
     }
   });
 }
 
-function enqueuePendingEconomicActions(privateData) {
-  const actions = privateData?.economic_actions || [];
+function enqueuePendingEconomicActions(privateData, publicActions = []) {
+  const cursor = privateData?.animation_cursor ?? privateData?.latest_economic_sequence ?? 0;
+  const actionsById = new Map();
+  [...(privateData?.unread_economic_actions || []), ...publicActions]
+    .filter((action) => action.sequence > cursor)
+    .forEach((action) => actionsById.set(action.action_id, action));
+  const actions = [...actionsById.values()].sort((left, right) => left.sequence - right.sequence).slice(-30);
   if (!economicActionsInitialized) {
-    actions.forEach((action) => rememberEconomicAction(action.action_id));
     economicActionsInitialized = true;
-    return;
   }
   actions.forEach(enqueueEconomicAction);
 }
@@ -527,11 +563,12 @@ function renderBoard(state, me) {
       el.dataset.cellIndex = String(index);
       el.style.setProperty("--x", coord.x);
       el.style.setProperty("--y", coord.y);
-      el.innerHTML = '<span class="cell-index"></span><strong></strong><small></small><div class="chip-stack"></div>';
+      el.innerHTML = '<span class="arrival-badge">도착</span><span class="cell-index"></span><strong></strong><small></small><div class="chip-stack"></div>';
       el.addEventListener("click", () => {
         selectedCellIndex = Number(el.dataset.cellIndex);
         activeInfoTab = "arrival";
-        renderInfoPanels(lastState, lastPrivate?.player, lastPrivate);
+        renderArrival(lastState, lastPrivate?.player, lastPrivate);
+        renderBoard(lastState, lastPrivate?.player);
         applyInfoTabs();
       });
       boardGrid.append(el);
@@ -539,8 +576,10 @@ function renderBoard(state, me) {
   }
   state.board.forEach((cell, index) => {
     const el = boardGrid.children[index];
-    const isFocus = index === (me?.position ?? currentTurnPlayer?.position ?? 0);
-    el.className = `board-cell cell-${cell?.type || "plain"} ${isFocus ? "current-cell" : ""} ${index === 0 ? "start-cell" : ""}`;
+    const isArrival = Boolean(me && index === me.position);
+    const isSelected = selectedCellIndex !== null && index === selectedCellIndex && !isArrival;
+    const isTurnPosition = Boolean(currentTurnPlayer && index === currentTurnPlayer.position);
+    el.className = `board-cell cell-${cell?.type || "plain"} ${isArrival ? "arrival-cell my-position-cell" : ""} ${isSelected ? "selected-cell" : ""} ${isTurnPosition ? "turn-player-cell" : ""} ${index === 0 ? "start-cell" : ""}`;
     el.querySelector(".cell-index").textContent = String(index);
     el.querySelector("strong").textContent = cellName(cell);
     el.querySelector("small").textContent = buildingSummary(state, cell);
@@ -556,8 +595,6 @@ function renderBoard(state, me) {
     chips.replaceChildren();
     state.players.filter((player) => player.position === index).forEach((player) => chips.append(playerChip(player)));
   });
-  const activeCell = state.board[me?.position ?? 0];
-  zoomCell.innerHTML = `<span>현재 위치</span><strong>${me ? `${me.position}. ${escapeHtml(cellName(activeCell))}` : "입장 대기"}</strong><small>${escapeHtml(activeCell?.type || "")}</small>`;
 }
 
 async function reconnectPlayer(signal) {
@@ -602,30 +639,39 @@ async function getPlayerSnapshot(signal) {
 }
 
 function renderMeters(state, me, privateData) {
-  const wealth = state.public_wealth?.players?.find((row) => row.player_id === playerId);
   const privatePlayer = privateData?.player || me;
   const remaining = privateData?.turn_remaining_seconds;
-  const assets = privateData?.assets || { lands: [], buildings: [], special_regions: [] };
-  const loan = privateData?.loan;
-  const ledger = privateData?.ledger || {};
-  playerState.innerHTML = `
-    <div class="metric"><span>닉네임 · 상태</span><strong>${escapeHtml(privatePlayer.nickname)} · ${statusName(privatePlayer.status)}</strong></div>
-    <div class="metric emerald"><span>현재 현금</span><strong data-current-cash>${money(privatePlayer.cash_won)}원</strong></div>
-    <div class="metric sapphire"><span>즉시 종료 총재산</span><strong>${money(wealth?.total_asset_won)}원</strong></div>
-    <div class="metric"><span>순위 · 위치</span><strong>${wealth?.rank ?? "-"}위 · ${privatePlayer.position}칸</strong></div>
-    <div class="metric"><span>라운드 · 남은 턴</span><strong>${state.global_round} · ${remaining == null ? "무제한" : `${remaining}초`}</strong></div>
-    <div class="metric"><span>보유 자산</span><strong>토지 ${assets.lands.length} · 특수 ${assets.special_regions.length} · 건물 ${assets.buildings.length}</strong></div>
-    <div class="metric ruby"><span>세금 · 대출</span><strong>${money(ledger.tax_due)}원 · ${money(loan?.remaining_due_won)}원</strong></div>
-  `;
+  const current = state.players.find((player) => player.id === state.current_turn_player_id);
+  const isMyTurn = state.current_turn_player_id === playerId;
+  topbarCash.textContent = `${money(privatePlayer.cash_won)}원`;
+  roundStatus.textContent = `R${state.global_round} / ${state.config.total_rounds}`;
+  turnTimer.className = "";
+  if (state.paused) {
+    turnTimer.textContent = "일시중지";
+    turnTimer.classList.add("timer-paused");
+  } else if (remaining == null) {
+    turnTimer.textContent = "시간 제한 없음";
+  } else {
+    const seconds = Math.max(0, Math.ceil(remaining));
+    turnTimer.textContent = `${seconds <= 5 ? "긴급 · " : seconds <= 10 ? "주의 · " : ""}${seconds}초`;
+    if (seconds <= 5) turnTimer.classList.add("timer-critical");
+    else if (seconds <= 10) turnTimer.classList.add("timer-warning");
+  }
+  mainGuide.textContent = isMyTurn
+    ? (privateData?.pending_action ? "내 턴 · 도착 칸에서 행동을 선택하세요." : "내 턴 · 가능한 행동을 확인하세요.")
+    : `${current?.nickname || "다음 플레이어"} 차례를 기다리는 중`;
 }
 
 function renderArrival(state, me, privateData) {
   const index = selectedCellIndex ?? me?.position ?? 0;
   const cell = state.board[index];
+  const isActualArrival = Boolean(me && index === me.position);
   const region = state.regions?.find((item) => item.id === cell?.region_id);
   const special = state.special_region_details?.[cell?.special_region_id];
   const ownerId = cell?.region_id ? state.land_ownership[cell.region_id] : state.special_ownership?.[cell?.special_region_id];
-  const pending = privateData?.pending_action;
+  const recentVisitExpense = (privateData?.recent_expenses || []).slice().reverse()
+    .find((item) => item.region_id === cell?.region_id && ["land_fee", "building_visit_fee"].includes(item.source));
+  const pending = isActualArrival ? privateData?.pending_action : null;
   const purchaseRule = privateData?.allowed_actions?.purchase_land;
   const buildRule = privateData?.allowed_actions?.build;
   const purchaseDetails = pending?.type === "purchase_land" ? `
@@ -641,22 +687,43 @@ function renderArrival(state, me, privateData) {
       ${pending.source === "land_purchase" ? "<span>토지 구매는 건물 행동을 소비하지 않습니다.</span><span>이번 방문에서 건물 1채를 추가로 건설할 수 있습니다.</span>" : ""}
       ${Object.entries(buildRule?.building_options || {}).map(([type, option]) => `<span>${typeName(type)} ${money(option.price_won)}원 · 건설 후 ${money(option.cash_after_won)}원${option.reason ? ` · ${escapeHtml(option.reason)}` : ""}</span>`).join("")}
     </div>` : "";
+  const cellTypeName = ({ region: "일반지역", special: "특수지역", event: "이벤트 칸", start: "출발지", transport: "교통·이동 칸" })[cell?.type] || cell?.type || "대기";
+  const availableActions = isActualArrival
+    ? Object.entries(privateData?.allowed_actions || {})
+      .filter(([name, rule]) => rule.allowed && ["purchase_land", "purchase_special", "build", "manage", "trade", "decline_action"].includes(name))
+      .map(([name]) => ({ purchase_land: "토지 구매", purchase_special: "특수지역 구매", build: "건설", manage: "관리", trade: "거래", decline_action: "포기" })[name])
+      .filter(Boolean)
+    : [];
+  const lastSettlement = privateData?.last_settlement;
+  const settlementLedger = lastSettlement?.ledger || privateData?.ledger || {};
+  const typeDetails = cell?.type === "event"
+    ? "<div class=\"callout sapphire\"><strong>이벤트 발생 칸</strong><span>도착 시 서버가 확정한 이벤트 카드를 공개합니다.</span></div>"
+    : cell?.type === "start"
+      ? `<div class="callout sapphire"><strong>출발지 정산</strong><span>산업·복합 수익 → 과세소득 → 세금 → 보너스 → 대출 상환 → 최종 현금</span>${lastSettlement ? `<span>보너스 ${money(settlementLedger.start_bonus)}원 · 세금 ${money(settlementLedger.tax_due)}원 · 대출 상환 ${money(settlementLedger.loan_payment)}원</span><span>정산 후 현금 ${money(lastSettlement.cash_after)}원</span>` : "<span>도착 후 서버 정산 결과가 여기에 표시됩니다.</span>"}</div>`
+      : cell?.type === "transport"
+        ? "<div class=\"callout sapphire\"><strong>교통·이동</strong><span>실제 이동 결과와 후속 행동은 서버 판정을 따릅니다.</span></div>"
+        : "";
+  arrivalPanel.classList.toggle("viewing-arrival", isActualArrival);
+  arrivalPanel.classList.toggle("viewing-selection", !isActualArrival);
   arrivalPanel.innerHTML = `
-    <h2>${index}. ${escapeHtml(cellName(cell) || "대기")}</h2>
-    <p>${escapeHtml(cell?.type || "입장 후 정보가 표시됩니다.")}</p>
-    ${region ? `<div class="detail-list"><span>토지가 ${money(region.land_price)}원</span><span>소유자 ${escapeHtml(playerName(state, ownerId))}</span><span>${escapeHtml(buildingSummary(state, cell) || "건물 없음")}</span></div>` : ""}
+    <span class="arrival-context">${isActualArrival ? "도착 칸" : "선택한 칸 · 행동은 실제 도착 칸 기준"}</span>
+    <h2>${escapeHtml(cellName(cell) || "대기")}</h2>
+    <p>${escapeHtml(cellTypeName)}</p>
+    ${region ? `<div class="detail-list"><span>토지가 ${money(region.land_price)}원</span><span>소유자 ${escapeHtml(ownerId ? playerName(state, ownerId) : "없음")}</span><span>${escapeHtml(buildingSummary(state, cell) || "건물 없음")}</span><span>${recentVisitExpense ? `최근 서버 확정 방문비용 ${money(recentVisitExpense.amount_won)}원` : "방문비용·방문료는 서버의 실제 건물과 이벤트 판정 후 확정됩니다."}</span></div>` : ""}
     ${special ? `<div class="special-sheet"><span>최초 가격 ${money(special.initial_price_won)}원</span><span>현재 가치 ${money(special.current_value_won)}원</span><span>타인 방문 ${special.external_visits}회 · 다음 상승 ${money(special.next_increase_won)}원</span><span>소유자 ${escapeHtml(playerName(state, ownerId))}</span><span>강제매각 ${money(special.forced_sale_min_won)}~${money(special.forced_sale_max_won)}원</span></div>` : ""}
-    ${purchaseDetails}${buildDetails}
+    ${typeDetails}${purchaseDetails}${buildDetails}
+    ${isActualArrival ? `<div class="arrival-actions-summary"><strong>가능한 행동</strong><span>${escapeHtml(availableActions.join(" · ") || "즉시 선택할 행동 없음")}</span></div>` : ""}
   `;
 }
 
 function renderAssets(state, privateData) {
+  const previousScroll = $("#financeScroll")?.scrollTop || 0;
   const assets = privateData?.assets || { lands: [], buildings: [], special_regions: [] };
   const ledger = privateData?.ledger || {};
   const loan = privateData?.loan;
   const refunds = privateData?.pending_commercial_sale_refunds || [];
   const buildingRows = assets.buildings.map((building) => `
-    <button class="asset-row" type="button" data-building-select="${escapeHtml(building.id)}">
+    <button class="asset-row" type="button" data-building-select="${escapeHtml(building.id)}" data-building-id="${escapeHtml(building.id)}" data-region-id="${escapeHtml(building.region_id)}">
       <strong>${escapeHtml(building.region_name)} · ${typeName(building.building_type)}</strong>
       <span>시세 ${money(building.adjusted_market_value_won)}원</span>
       <span>명목 ${escapeHtml(building.nominal_owner_name)} · 운영 ${escapeHtml(building.operator_name)}</span>
@@ -666,14 +733,16 @@ function renderAssets(state, privateData) {
   `).join("") || "<p>보유 건물이 없습니다.</p>";
   assetPanel.innerHTML = `
     <h2>본인 자산현황</h2>
-    <section class="asset-section"><h3>세금</h3><div class="detail-list"><span>과세소득 ${money(ledger.taxable_income)}원</span><span>세율 ${percent(privateData?.tax_rate_bps)}</span><span>${ledger.closed ? "확정" : "예상"} 세금 ${money(ledger.tax_due)}원</span></div></section>
-    <section class="asset-section"><h3>대출</h3>${loan ? `<div class="detail-list"><span>원금 ${money(loan.principal_won)}원</span><span>남은 총상환액 ${money(loan.remaining_due_won)}원</span><span>이자 ${money(loan.interest_won)}원</span><span>마감까지 출발지 ${loan.due_laps_remaining}회 · 자동상환</span></div>` : "<p>대출 없음</p>"}</section>
-    <section class="asset-section"><h3>일반토지 ${assets.lands.length}</h3><p>${assets.lands.map((land) => `${escapeHtml(land.name)}(${money(land.land_price_won)}원)`).join(" · ") || "없음"}</p></section>
-    <section class="asset-section"><h3>특수지역 ${assets.special_regions.length}</h3><p>${assets.special_regions.map((item) => `${escapeHtml(item.name)} 최초 ${money(item.initial_price_won)} / 현재 ${money(item.current_value_won)}원`).join(" · ") || "없음"}</p></section>
-    <section class="asset-section"><h3>건물 ${assets.buildings.length}</h3><div class="asset-list">${buildingRows}</div></section>
-    <section class="asset-section"><h3>상업 매각 예정 환급</h3><p>${refunds.map((item) => `${escapeHtml(regionName(state, item.region_id))} ${money(item.refund_won)}원`).join(" · ") || "없음"}</p></section>
-    <section class="asset-section"><h3>최근 수익·지출</h3><p>수익 ${(privateData?.recent_income || []).slice(-3).map((item) => `${escapeHtml(item.source)} ${money(item.amount_won)}`).join(" · ") || "없음"}</p><p>지출 ${(privateData?.recent_expenses || []).slice(-3).map((item) => `${escapeHtml(item.source)} ${money(item.amount_won)}`).join(" · ") || "없음"}</p></section>
+    <section class="asset-section" data-finance-pane="tax" data-finance-section="tax"><h3>세금</h3><div class="detail-list"><span>과세소득 ${money(ledger.taxable_income)}원</span><span>세율 ${percent(privateData?.tax_rate_bps)}</span><span>${ledger.closed ? "확정" : "예상"} 세금 ${money(ledger.tax_due)}원</span></div></section>
+    <section class="asset-section" data-finance-pane="loan" data-finance-section="loan"><h3>대출</h3>${loan ? `<div class="detail-list"><span>원금 ${money(loan.principal_won)}원</span><span>남은 총상환액 ${money(loan.remaining_due_won)}원</span><span>이자 ${money(loan.interest_won)}원</span><span>마감까지 출발지 ${loan.due_laps_remaining}회 · 자동상환</span></div>` : "<p>대출 없음</p>"}</section>
+    <section class="asset-section" data-finance-pane="assets"><h3>일반토지 ${assets.lands.length}</h3><div class="asset-list">${assets.lands.map((land) => `<div class="asset-row" data-region-id="${escapeHtml(land.region_id)}">${escapeHtml(land.name)} (${money(land.land_price_won)}원)</div>`).join("") || "없음"}</div></section>
+    <section class="asset-section" data-finance-pane="assets"><h3>특수지역 ${assets.special_regions.length}</h3><div class="asset-list">${assets.special_regions.map((item) => `<div class="asset-row" data-special-region-id="${escapeHtml(item.special_region_id)}">${escapeHtml(item.name)} 최초 ${money(item.initial_price_won)} / 현재 ${money(item.current_value_won)}원</div>`).join("") || "없음"}</div></section>
+    <section class="asset-section" data-finance-pane="assets"><h3>건물·운영권 ${assets.buildings.length}</h3><div class="asset-list">${buildingRows}</div></section>
+    <section class="asset-section" data-finance-pane="history"><h3>상업 매각 예정 환급</h3><div class="asset-list">${refunds.map((item) => `<div class="asset-row" data-refund-region-id="${escapeHtml(item.region_id)}">${escapeHtml(regionName(state, item.region_id))} ${money(item.refund_won)}원</div>`).join("") || "없음"}</div></section>
+    <section class="asset-section" data-finance-pane="history"><h3>최근 수익·지출</h3><p>수익 ${(privateData?.recent_income || []).slice(-3).map((item) => `R${item.round ?? "-"} · ${escapeHtml(item.region_id ? `${regionName(state, item.region_id)} ` : "")}${escapeHtml(item.display_name || item.source)} +${money(item.amount_won)}원${item.counterparty_player_id ? ` · ${escapeHtml(playerName(state, item.counterparty_player_id))}` : ""}`).join("<br>") || "없음"}</p><p>지출 ${(privateData?.recent_expenses || []).slice(-3).map((item) => `R${item.round ?? "-"} · ${escapeHtml(item.region_id ? `${regionName(state, item.region_id)} ` : "")}${escapeHtml(item.display_name || item.source)} -${money(item.amount_won)}원${item.counterparty_player_id ? ` · ${escapeHtml(playerName(state, item.counterparty_player_id))}` : ""}`).join("<br>") || "없음"}</p></section>
   `;
+  applyFinanceTab();
+  if ($("#financeScroll")) $("#financeScroll").scrollTop = previousScroll;
   assetPanel.querySelectorAll("[data-building-select]").forEach((button) => {
     button.addEventListener("click", () => {
       selectedBuildingId = button.dataset.buildingSelect;
@@ -685,7 +754,7 @@ function renderAssets(state, privateData) {
 function renderEvents(state, privateData) {
   const activeEvents = privateData?.active_events || [];
   eventPanel.innerHTML = `<h2>현재 적용 이벤트</h2>${activeEvents.map((event) => `
-    <div class="event-card"><strong>${escapeHtml(event.id)}</strong><span>${event.age_rounds <= event.duration_rounds ? "활성 단계" : "회복 단계"}</span><div class="progress"><i style="width:${Math.min(100, Math.max(0, (event.age_rounds / Math.max(1, event.duration_rounds + event.recovery_rounds)) * 100))}%"></i></div></div>
+    <div class="event-card"><strong>${escapeHtml(event.title)}</strong><span>${escapeHtml(scopeName(event.scope))} · ${escapeHtml(event.target_name)}</span><span>${escapeHtml(({ growing: "확대", peak: "최대", recovering: "회복", completed: "종료" })[event.phase] || event.phase)} · ${event.rounds_remaining}라운드 남음</span><span>${escapeHtml((event.current_effect_summary || []).join(" · "))}</span><small>최대 ${escapeHtml((event.maximum_effect_summary || []).join(" · "))}</small><div class="progress"><i style="width:${Math.min(100, Math.max(0, event.phase_progress_bps / 100))}%"></i></div></div>
   `).join("") || "<p>현재 적용 이벤트가 없습니다.</p>"}<div class="gauge"><span>산업 수익률</span><i style="left:50%"></i><b style="width:${Math.min(100, (state.industrial_return_rate_bps / 2400) * 100)}%"></b><em>${percent(state.industrial_return_rate_bps)}</em></div>`;
 }
 
@@ -722,9 +791,15 @@ function requestDetails(state, offer) {
 
 function renderRequests(state, privateData) {
   const requests = privateData?.related_requests || [];
+  const recentStatuses = (privateData?.recent_domain_events || []).slice(-3).reverse();
+  const statusNames = {
+    land_trade_proposed: "토지 거래 제안 전송", land_trade_accepted: "토지 거래 성립", land_trade_rejected: "토지 거래 거절", land_trade_expired: "토지 거래 만료",
+    operating_right_proposed: "운영권 양도 제안 전송", operating_right_accepted: "운영권 거래 성립", operating_right_rejected: "운영권 거래 거절", operating_right_expired: "운영권 거래 만료",
+    usage_change_requested: "용도 변경 신청", usage_change_approved: "용도 변경 승인", usage_change_rejected: "용도 변경 거절", rights_recalled: "권한 회수 완료"
+  };
   const takeover = privateData?.pending_land_takeover;
   const takeoverHtml = takeover ? `<div class="request-card"><strong>파산 토지 인수</strong><span>지역 ${escapeHtml(regionName(state, takeover.region_id))}</span><span>필요 토지가 ${money(takeover.land_price_won)}원 · 현재 현금 ${money(takeover.current_cash_won)}원</span><span>남은 시간 ${takeover.remaining_seconds}초 · 미응답 자동 포기</span></div>` : "";
-  requestPanel.innerHTML = `<h2>거래 및 승인 요청</h2>${requests.map((offer) => `<div class="request-card">${requestDetails(state, offer)}</div>`).join("")}${takeoverHtml || (!requests.length ? "<p>관련 요청이 없습니다.</p>" : "")}`;
+  requestPanel.innerHTML = `<h2>거래 및 승인 요청</h2>${requests.map((offer) => `<div class="request-card">${requestDetails(state, offer)}</div>`).join("")}${takeoverHtml || (!requests.length ? "<p>관련 요청이 없습니다.</p>" : "")}<h3>최근 요청 상태</h3>${recentStatuses.map((event) => `<p>R${event.round} · ${escapeHtml(statusNames[event.event_type] || event.event_type)}</p>`).join("") || "<p>최근 상태 변경 없음</p>"}`;
 }
 
 function renderTradeModal(state, privateData) {
@@ -732,7 +807,14 @@ function renderTradeModal(state, privateData) {
   if (takeover) {
     tradeModal.hidden = false;
     tradeModal.innerHTML = `<div class="dealer-card trade-card"><div class="trade-description"><strong>파산 토지 인수</strong><span>지역 ${escapeHtml(regionName(state, takeover.region_id))}</span><span>필요 토지가 ${money(takeover.land_price_won)}원 · 현재 현금 ${money(takeover.current_cash_won)}원</span><span>남은 시간 ${takeover.remaining_seconds}초 · 미응답 자동 포기</span></div><div class="response-actions"><button type="button" data-takeover="accept" ${takeover.can_accept ? "" : "disabled"}>인수</button><button type="button" class="danger-action" data-takeover="reject">포기</button></div></div>`;
-    tradeModal.querySelectorAll("[data-takeover]").forEach((button) => button.addEventListener("click", () => performAction(button, "/api/bankruptcy/takeover/respond", { player_id: playerId, accept: button.dataset.takeover === "accept" })));
+    tradeModal.querySelectorAll("[data-takeover]").forEach((button) => button.addEventListener("click", () => {
+      const accept = button.dataset.takeover === "accept";
+      if (!accept) return performAction(button, "/api/bankruptcy/takeover/respond", { player_id: playerId, accept });
+      return confirmedRequest(button, "/api/bankruptcy/takeover/respond", { player_id: playerId, accept }, {
+        title: "파산 토지를 인수할까요?", target: regionName(state, takeover.region_id), amount: takeover.land_price_won,
+        cashAfter: takeover.current_cash_won - takeover.land_price_won, change: "토지와 관련 건물의 명목 소유권을 인수합니다.", strong: true, reversible: false, confirmLabel: "토지 인수 확정"
+      });
+    }));
     return;
   }
   const requests = privateData?.related_requests || [];
@@ -755,7 +837,7 @@ function renderBankruptcy(privateData) {
   const bankruptcy = privateData?.bankruptcy;
   if (!bankruptcy || !["bankrupt", "exited", "spectator"].includes(bankruptcy.status)) return "";
   const record = bankruptcy.record || {};
-  return `<div class="bankruptcy-card"><strong>${statusName(bankruptcy.status)}</strong><span>사유 ${escapeHtml(record.reason || bankruptcy.reason)}</span><span>파산 라운드 ${record.bankruptcy_round ?? "-"}</span><span>${bankruptcy.spectating ? "현재 관전 상태" : ""}</span><span>${bankruptcy.can_revive ? "지금 부활 가능 · 현금 10,000,000원·출발지에서 재시작" : escapeHtml(bankruptcy.reason)}</span></div>`;
+  return `<div class="bankruptcy-card" data-finance-pane="assets"><strong>파산·부활 정보</strong><span>사유 ${escapeHtml(record.reason || bankruptcy.reason)}</span><span>파산 라운드 ${record.bankruptcy_round ?? "-"}</span><span>${bankruptcy.spectating ? "현재 관전 상태" : ""}</span><span>${bankruptcy.can_revive ? "지금 부활 가능 · 현금 10,000,000원·출발지에서 재시작" : escapeHtml(bankruptcy.reason)}</span></div>`;
 }
 
 function renderInfoPanels(state, me, privateData) {
@@ -766,6 +848,7 @@ function renderInfoPanels(state, me, privateData) {
   renderRequests(state, privateData);
   const bankruptcyHtml = renderBankruptcy(privateData);
   if (bankruptcyHtml) assetPanel.insertAdjacentHTML("afterbegin", bankruptcyHtml);
+  applyFinanceTab();
 }
 
 function renderManagement(state, privateData, mode = "manage") {
@@ -823,9 +906,68 @@ function renderManagement(state, privateData, mode = "manage") {
   managementPanel.querySelectorAll("[data-manage]").forEach((button) => button.addEventListener("click", () => manageRequest(button.dataset.manage, button)));
 }
 
+let rankingDialogOrigin = null;
+let financeDialogOrigin = null;
+
+function renderRankings(state) {
+  const list = $("#rankingList");
+  const rankedRows = $("#rankedPlayerRows");
+  const unrankedRows = $("#unrankedPlayerRows");
+  const unrankedGroup = $("#unrankedPlayers");
+  const rows = state.public_wealth?.players || [];
+  const activeIds = new Set(rows.map((row) => row.player_id));
+  list.querySelectorAll("[data-ranking-player-id]").forEach((element) => {
+    if (!activeIds.has(element.dataset.rankingPlayerId)) element.remove();
+  });
+  rows.forEach((row) => {
+    const player = state.players.find((item) => item.id === row.player_id) || {};
+    let element = list.querySelector(`[data-ranking-player-id="${CSS.escape(row.player_id)}"]`);
+    if (!element) {
+      element = document.createElement("div");
+      element.className = "ranking-row";
+      element.dataset.rankingPlayerId = row.player_id;
+    }
+    const rowContainer = row.rank == null ? unrankedRows : rankedRows;
+    if (element.parentElement !== rowContainer) rowContainer.append(element);
+    const nextRank = row.rank == null ? "순위 없음" : `${row.rank}위`;
+    if (element.dataset.rank && element.dataset.rank !== String(row.rank)) {
+      element.classList.add("rank-changed");
+      window.setTimeout(() => element.classList.remove("rank-changed"), 600);
+    }
+    element.dataset.rank = String(row.rank);
+    element.classList.toggle("ranking-exited", row.status === "exited");
+    element.innerHTML = `
+      <strong>${escapeHtml(nextRank)}</strong>
+      <span>${escapeHtml(row.nickname)}${player.is_bot ? " · BOT" : ""}</span>
+      <span>${escapeHtml(statusName(row.status))}</span>
+      <span>공개 자산 ${money(row.total_asset_won)}원</span>
+      <span>토지 ${(player.lands || []).length}</span>
+      <span>${state.current_turn_player_id === row.player_id ? "● 현재 턴" : ""}</span>`;
+  });
+  unrankedGroup.hidden = !rows.some((row) => row.rank == null);
+}
+
+function applyFinanceTab() {
+  document.querySelectorAll("[data-finance-tab]").forEach((button) => button.classList.toggle("active", button.dataset.financeTab === activeFinanceTab));
+  document.querySelectorAll("[data-finance-pane]").forEach((pane) => { pane.hidden = pane.dataset.financePane !== activeFinanceTab; });
+}
+
+function openPanelDialog(modal, origin) {
+  if (modal === rankingModal) rankingDialogOrigin = origin;
+  if (modal === financeModal) financeDialogOrigin = origin;
+  modal.hidden = false;
+  window.requestAnimationFrame(() => modal.querySelector("button")?.focus());
+}
+
+function closePanelDialog(modal) {
+  modal.hidden = true;
+  if (modal === rankingModal) { rankingDialogOrigin?.focus(); rankingDialogOrigin = null; }
+  if (modal === financeModal) { financeDialogOrigin?.focus(); financeDialogOrigin = null; }
+}
+
 function applyInfoTabs() {
   document.querySelectorAll("[data-info-tab]").forEach((button) => button.classList.toggle("active", button.dataset.infoTab === activeInfoTab));
-  const panels = { arrival: arrivalPanel, assets: assetPanel, events: eventPanel, settlement: settlementPanel, requests: requestPanel };
+  const panels = { arrival: arrivalPanel, events: eventPanel, requests: requestPanel };
   Object.entries(panels).forEach(([name, panel]) => panel.classList.toggle("compact-hidden", activeInfoTab !== name));
 }
 
@@ -880,7 +1022,14 @@ async function refreshPlayer() {
       state.game_instance_id !== lastState.game_instance_id
       || state.ended
       || privateData?.player?.status === "exited"
+      || privateData?.player?.status === "bankrupt"
+      || (lastPrivate && !privateData)
     );
+    if (lastState && state.game_instance_id !== lastState.game_instance_id) {
+      lastArrivalPosition = null;
+      selectedCellIndex = null;
+      pendingArrivalFocus = null;
+    }
     if (criticalChange) {
       animationController.cancel();
       pendingSnapshot = null;
@@ -889,6 +1038,8 @@ async function refreshPlayer() {
       economicActionsInitialized = false;
       buildConfirmModal.hidden = true;
       activeBuildPreview = null;
+      rankingModal.hidden = true;
+      financeModal.hidden = true;
     } else if (animationState.playing) {
       pendingSnapshot = { public: state, private: privateData, state_version: state.state_version };
       return;
@@ -908,22 +1059,45 @@ async function refreshPlayer() {
     lastState = state;
     lastPrivate = privateData;
     joinForm.hidden = Boolean(authenticatedMe);
-    playerBadge.textContent = authenticatedMe ? `${authenticatedMe.nickname} · ${statusName(authenticatedMe.status)}` : "입장 전";
-    if (!authenticatedMe) playerState.innerHTML = `<div class="metric sapphire"><span>게임 상태</span><strong>${escapeHtml(state.phase)}</strong></div>`;
+    playerBadge.innerHTML = authenticatedMe
+      ? `<strong>${escapeHtml(authenticatedMe.nickname)}</strong><span>${escapeHtml(statusName(authenticatedMe.status))}</span>`
+      : "<strong>입장 전</strong><span>대기</span>";
     const current = state.players.find((player) => player.id === state.current_turn_player_id);
-    turnTitle.textContent = current ? `${current.nickname} 턴` : "대기 중";
+    turnTitle.textContent = current ? (current.id === playerId ? "내 턴" : `${current.nickname} 턴`) : "대기 중";
+    if (!authenticatedMe) {
+      topbarCash.textContent = "—";
+      roundStatus.textContent = `R${state.global_round} / ${state.config.total_rounds}`;
+      turnTimer.textContent = "입장 후 표시";
+      mainGuide.textContent = "게임 입장을 기다리고 있습니다.";
+    }
     renderBoard(state, authenticatedMe);
     if (authenticatedMe) renderMeters(state, authenticatedMe, privateData);
     renderInfoPanels(state, authenticatedMe, privateData);
+    renderRankings(state);
     renderTradeModal(state, privateData);
     applyInfoTabs();
     renderActionState();
     renderedStateVersion = state.state_version;
     pendingSnapshot = null;
     enqueuePendingEvents(privateData);
-    enqueuePendingEconomicActions(privateData);
+    enqueuePendingEconomicActions(privateData, state.public_economic_actions || []);
+    if (authenticatedMe) {
+      if (lastArrivalPosition === null) {
+        lastArrivalPosition = authenticatedMe.position;
+        if (selectedCellIndex === null) selectedCellIndex = authenticatedMe.position;
+      } else if (authenticatedMe.position !== lastArrivalPosition) {
+        lastArrivalPosition = authenticatedMe.position;
+        focusArrivalInformation(authenticatedMe.position);
+      }
+    }
   } catch (error) {
-    if (error.name !== "AbortError") showMessage(error.message || "상태를 불러오지 못했습니다.", true);
+    if (error.name !== "AbortError") {
+      if (animationState.playing) animationController.cancel();
+      actionInFlight = false;
+      hideAnimationOverlay();
+      renderActionState();
+      showMessage(error.message || "서버 연결이 끊겼습니다. 다시 연결하는 중입니다.", true);
+    }
   } finally {
     refreshInFlight = false;
     refreshController = null;
@@ -935,6 +1109,33 @@ function pollingDelay() {
   if (!lastState || ["setup", "lobby", "finished"].includes(lastState.phase)) return 4000;
   const waiting = lastPrivate?.pending_action || (lastPrivate?.related_requests || []).length;
   return lastState.current_turn_player_id === playerId || waiting ? 750 : 2000;
+}
+
+function arrivalFocusBlocked() {
+  return !financeModal.hidden || !rankingModal.hidden || !tradeModal.hidden
+    || !buildConfirmModal.hidden || !$("#actionConfirmModal").hidden || !eventReveal.hidden;
+}
+
+function focusArrivalInformation(position, animate = true) {
+  pendingArrivalFocus = position;
+  if (arrivalFocusBlocked() || !lastState || !lastPrivate) return;
+  selectedCellIndex = position;
+  activeInfoTab = "arrival";
+  renderBoard(lastState, lastPrivate.player);
+  renderArrival(lastState, lastPrivate.player, lastPrivate);
+  applyInfoTabs();
+  arrivalPanel.classList.toggle("arrival-card-emphasis", animate && selectedAnimationMode() !== "minimal");
+  document.querySelectorAll(".command-zone button:not([disabled])").forEach((button) => {
+    button.classList.toggle("arrival-action-emphasis", animate && selectedAnimationMode() !== "minimal");
+  });
+  window.setTimeout(() => arrivalPanel.classList.remove("arrival-card-emphasis"), 600);
+  window.setTimeout(() => document.querySelectorAll(".arrival-action-emphasis").forEach((button) => button.classList.remove("arrival-action-emphasis")), 600);
+  arrivalPanel.scrollIntoView({ block: "nearest", behavior: selectedAnimationMode() === "minimal" ? "auto" : "smooth" });
+  pendingArrivalFocus = null;
+}
+
+function flushPendingArrivalFocus() {
+  if (pendingArrivalFocus !== null) focusArrivalInformation(pendingArrivalFocus);
 }
 
 function scheduleRefresh(immediate = false) {
@@ -949,6 +1150,76 @@ function scheduleRefresh(immediate = false) {
 function showMessage(message, isError = false) {
   actionMessage.textContent = message || "";
   actionMessage.classList.toggle("error", isError);
+}
+
+let confirmationOrigin = null;
+let pendingConfirmedAction = null;
+
+function confirmationFocusables(modal) {
+  return [...modal.querySelectorAll('button:not([disabled]), select:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+}
+
+function trapConfirmationFocus(event, modal) {
+  if (event.key !== "Tab" || modal.hidden) return;
+  const focusables = confirmationFocusables(modal);
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}
+
+function closeActionConfirmation() {
+  if (actionInFlight) return;
+  $("#actionConfirmModal").hidden = true;
+  pendingConfirmedAction = null;
+  confirmationOrigin?.focus();
+  confirmationOrigin = null;
+  flushPendingArrivalFocus();
+}
+
+function confirmBeforeAction(origin, config, callback) {
+  if (actionInFlight || animationState.playing) return;
+  confirmationOrigin = origin || document.activeElement;
+  pendingConfirmedAction = callback;
+  const modal = $("#actionConfirmModal");
+  modal.classList.toggle("strong-confirm", Boolean(config.strong));
+  $("#actionConfirmTitle").textContent = config.title;
+  $("#actionConfirmDetails").innerHTML = `
+    <dl class="confirm-details">
+      <dt>행동 대상</dt><dd>${escapeHtml(config.target || "현재 대상")}</dd>
+      <dt>지급·수령 금액</dt><dd>${config.amount == null ? "금액 이동 없음" : `${money(config.amount)}원`}</dd>
+      <dt>현재 현금</dt><dd>${money(lastPrivate?.player?.cash_won)}원</dd>
+      <dt>처리 후 예상 현금</dt><dd>${config.cashAfter == null ? "상대 응답·서버 판정 후 확정" : `${money(config.cashAfter)}원`}</dd>
+      <dt>권리 변경</dt><dd>${escapeHtml(config.change || "서버 결과에 따라 반영")}</dd>
+      <dt>되돌리기</dt><dd>${config.reversible ? "후속 행동으로 변경 가능" : "처리 후 즉시 되돌릴 수 없음"}</dd>
+      <dt>세금·수익 영향</dt><dd>${escapeHtml(config.impact || "서버 공식 규칙에 따라 반영")}</dd>
+      <dt>서버 상태 버전</dt><dd>${lastPrivate?.state_version ?? "-"}</dd>
+    </dl>`;
+  $("#actionConfirmError").textContent = "";
+  $("#confirmAction").textContent = config.confirmLabel || "확정";
+  modal.hidden = false;
+  window.requestAnimationFrame(() => $("#cancelActionConfirm").focus());
+}
+
+async function runConfirmedAction() {
+  if (!pendingConfirmedAction || actionInFlight) return;
+  const callback = pendingConfirmedAction;
+  $("#actionConfirmModal").hidden = true;
+  pendingConfirmedAction = null;
+  try { await callback(); }
+  finally {
+    confirmationOrigin?.focus();
+    confirmationOrigin = null;
+  }
+}
+
+function confirmedRequest(button, url, body, config) {
+  const confirmedStateVersion = lastPrivate?.state_version;
+  confirmBeforeAction(button, config, () => performAction(button, url, {
+    ...body,
+    expected_state_version: confirmedStateVersion
+  }));
 }
 
 async function performAction(button, url, body) {
@@ -1005,12 +1276,14 @@ function renderBuildConfirmation(preview) {
 async function openBuildConfirmation() {
   if (actionInFlight || animationState.playing || !action("build").allowed) return;
   const selectedType = buildingType.value;
+  buildConfirmationOrigin = build;
   buildConfirmModal.hidden = false;
   $("#buildConfirmDetails").innerHTML = "<p>최신 건설 조건을 확인하는 중…</p>";
   $("#buildConfirmError").textContent = "";
   $("#confirmBuild").disabled = true;
   try {
     renderBuildConfirmation(await loadBuildPreview(selectedType));
+    window.requestAnimationFrame(() => $("#cancelBuildConfirm").focus());
   } catch (error) {
     $("#buildConfirmError").textContent = error.message;
   }
@@ -1020,6 +1293,9 @@ function closeBuildConfirmation() {
   if (actionInFlight) return;
   buildConfirmModal.hidden = true;
   activeBuildPreview = null;
+  buildConfirmationOrigin?.focus();
+  buildConfirmationOrigin = null;
+  flushPendingArrivalFocus();
 }
 
 async function confirmBuildAction() {
@@ -1052,6 +1328,10 @@ async function confirmBuildAction() {
     $("#cancelBuildConfirm").disabled = false;
     renderActionState();
     await refreshPlayer();
+    if (buildConfirmModal.hidden) {
+      buildConfirmationOrigin?.focus();
+      buildConfirmationOrigin = null;
+    }
   }
 }
 
@@ -1081,17 +1361,51 @@ async function performRoll(button) {
 
 async function manageRequest(kind, button) {
   if (!selectedBuildingId && kind !== "land") return;
-  if (kind === "sell") return performAction(button, "/api/sell-building", { player_id: playerId, building_id: selectedBuildingId });
-  if (kind === "usage") return performAction(button, "/api/usage-change/request", { requester_id: playerId, building_id: selectedBuildingId, new_type: $("#usageType").value });
-  if (kind === "recall") return performAction(button, "/api/operating-right/recall", { requester_id: playerId, building_id: selectedBuildingId });
-  if (kind === "right") return performAction(button, "/api/operating-right/transfer/propose", { requester_id: playerId, target_id: $("#rightTarget").value, building_id: selectedBuildingId, price_won: Number($("#rightPrice").value) });
-  if (kind === "land") return performAction(button, "/api/trade/land/propose", { requester_id: playerId, buyer_id: $("#landBuyer").value, region_id: action("propose_land_trade").region_id });
+  const selected = lastPrivate?.assets?.buildings?.find((item) => item.id === selectedBuildingId);
+  if (kind === "sell") return confirmedRequest(button, "/api/sell-building", { player_id: playerId, building_id: selectedBuildingId }, {
+    title: "건물을 매각할까요?", target: `${selected?.region_name} ${typeName(selected?.building_type)}`,
+    amount: selected?.immediate_sale_proceeds_won, cashAfter: (lastPrivate?.player?.cash_won || 0) + (selected?.immediate_sale_proceeds_won || 0),
+    change: "건물 소유권과 보드 아이콘이 제거됩니다.", impact: selected?.sale_mode, strong: true, reversible: false, confirmLabel: "건물 매각 확정"
+  });
+  if (kind === "usage") {
+    const newType = $("#usageType").value;
+    const option = selected?.usage_change_options?.[newType];
+    return confirmedRequest(button, "/api/usage-change/request", { requester_id: playerId, building_id: selectedBuildingId, new_type: newType }, {
+      title: "용도 변경을 신청할까요?", target: `${selected?.region_name} · ${typeName(selected?.building_type)} → ${typeName(newType)}`,
+      amount: option?.cost_won, cashAfter: (lastPrivate?.player?.cash_won || 0) - (option?.cost_won || 0), change: "승인 완료 시 건물 유형과 운영 체인이 변경됩니다.", reversible: false
+    });
+  }
+  if (kind === "recall") return confirmedRequest(button, "/api/operating-right/recall", { requester_id: playerId, building_id: selectedBuildingId }, {
+    title: "운영권을 회수할까요?", target: `${selected?.region_name} ${typeName(selected?.building_type)}`, amount: selected?.recall_preview?.payout_won,
+    cashAfter: null, change: `${selected?.recall_preview?.payer_name} → ${selected?.recall_preview?.recipient_name} 지급 후 하위 체인 제거`, strong: true, reversible: false
+  });
+  if (kind === "right") {
+    const price = Number($("#rightPrice").value);
+    return confirmedRequest(button, "/api/operating-right/transfer/propose", { requester_id: playerId, target_id: $("#rightTarget").value, building_id: selectedBuildingId, price_won: price }, {
+      title: "운영권 양도를 제안할까요?", target: `${selected?.region_name} · ${typeName(selected?.building_type)}`, amount: price,
+      cashAfter: null, change: "상대가 수락하면 운영 체인 끝에 상대가 추가됩니다.", strong: true, reversible: false, confirmLabel: "양도 제안 전송"
+    });
+  }
+  if (kind === "land") {
+    const regionId = action("propose_land_trade").region_id;
+    const price = lastState.regions?.find((item) => item.id === regionId)?.land_price;
+    return confirmedRequest(button, "/api/trade/land/propose", { requester_id: playerId, buyer_id: $("#landBuyer").value, region_id: regionId }, {
+      title: "토지 거래를 제안할까요?", target: regionName(lastState, regionId), amount: price, cashAfter: null,
+      change: "상대가 수락하면 토지 소유권이 이전됩니다.", reversible: false, confirmLabel: "거래 제안 전송"
+    });
+  }
 }
 
 async function respondToRequest(offer, accept, button) {
-  if (offer.type === "land_trade") return performAction(button, "/api/trade/land/respond", { responder_id: playerId, accept });
-  if (offer.type === "operating_right") return performAction(button, "/api/operating-right/transfer/respond", { responder_id: playerId, accept });
-  return performAction(button, "/api/usage-change/respond", { approver_id: playerId, approve: accept });
+  const url = offer.type === "land_trade" ? "/api/trade/land/respond" : offer.type === "operating_right" ? "/api/operating-right/transfer/respond" : "/api/usage-change/respond";
+  const body = offer.type === "usage_change" ? { approver_id: playerId, approve: accept } : { responder_id: playerId, accept };
+  if (!accept) return performAction(button, url, body);
+  return confirmedRequest(button, url, body, {
+    title: `${requestLabel(offer.type)}를 ${offer.type === "usage_change" ? "승인" : "수락"}할까요?`,
+    target: offer.region_id ? regionName(lastState, offer.region_id) : requestLabel(offer.type), amount: offer.price_won ?? offer.cost_won,
+    cashAfter: offer.type === "usage_change" ? null : (lastPrivate?.player?.cash_won || 0) - (offer.price_won || 0),
+    change: offer.expected_chain ? offer.expected_chain.map((id) => playerName(lastState, id)).join(" → ") : "수락 즉시 권리가 변경됩니다.", reversible: false
+  });
 }
 
 joinForm.addEventListener("submit", async (event) => {
@@ -1119,8 +1433,14 @@ joinForm.addEventListener("submit", async (event) => {
 
 $("#rollDice").addEventListener("click", (event) => performRoll(event.currentTarget));
 $("#endTurn").addEventListener("click", (event) => performAction(event.currentTarget, "/api/end-turn", { player_id: playerId }));
-purchaseLand.addEventListener("click", (event) => performAction(event.currentTarget, "/api/purchase-land", { player_id: playerId }));
-purchaseSpecial.addEventListener("click", (event) => performAction(event.currentTarget, "/api/purchase-special", { player_id: playerId }));
+purchaseLand.addEventListener("click", (event) => {
+  const rule = action("purchase_land");
+  confirmedRequest(event.currentTarget, "/api/purchase-land", { player_id: playerId }, { title: "일반토지를 구매할까요?", target: regionName(lastState, rule.region_id), amount: rule.price_won, cashAfter: rule.cash_after_won, change: "토지 소유자로 등록됩니다.", reversible: false, confirmLabel: "토지 구매 확정" });
+});
+purchaseSpecial.addEventListener("click", (event) => {
+  const pending = lastPrivate?.pending_action || {};
+  confirmedRequest(event.currentTarget, "/api/purchase-special", { player_id: playerId }, { title: "특수지역을 구매할까요?", target: pending.special_region_id, amount: pending.price_won, cashAfter: (lastPrivate?.player?.cash_won || 0) - (pending.price_won || 0), change: "특수지역 소유자로 등록됩니다.", reversible: false, confirmLabel: "특수지역 구매 확정" });
+});
 declineAction.addEventListener("click", (event) => performAction(event.currentTarget, "/api/decline-action", { player_id: playerId }));
 build.addEventListener("click", openBuildConfirmation);
 $("#cancelBuildConfirm").addEventListener("click", closeBuildConfirmation);
@@ -1128,7 +1448,15 @@ $("#confirmBuild").addEventListener("click", confirmBuildAction);
 buildConfirmModal.addEventListener("click", (event) => {
   if (event.target === buildConfirmModal) closeBuildConfirmation();
 });
-reviveAction.addEventListener("click", (event) => performAction(event.currentTarget, "/api/revive", { player_id: playerId }));
+reviveAction.addEventListener("click", (event) => confirmedRequest(event.currentTarget, "/api/revive", { player_id: playerId }, {
+  title: "플레이어로 부활할까요?", target: "현재 관전 캐릭터", amount: 0, cashAfter: 10_000_000,
+  change: "출발지에서 현금 10,000,000원으로 게임에 복귀합니다.", reversible: false, confirmLabel: "부활 확정"
+}));
+$("#cancelActionConfirm").addEventListener("click", closeActionConfirmation);
+$("#confirmAction").addEventListener("click", runConfirmedAction);
+$("#actionConfirmModal").addEventListener("click", (event) => {
+  if (event.target === $("#actionConfirmModal")) closeActionConfirmation();
+});
 manageAction.addEventListener("click", () => renderManagement(lastState, lastPrivate, "manage"));
 tradeAction.addEventListener("click", () => renderManagement(lastState, lastPrivate, "trade"));
 
@@ -1136,14 +1464,24 @@ document.querySelectorAll("[data-info-tab]").forEach((button) => button.addEvent
   activeInfoTab = button.dataset.infoTab;
   applyInfoTabs();
 }));
+$("#openRankings").addEventListener("click", (event) => openPanelDialog(rankingModal, event.currentTarget));
+$("#closeRankings").addEventListener("click", () => { closePanelDialog(rankingModal); flushPendingArrivalFocus(); });
+$("#openFinance").addEventListener("click", (event) => {
+  applyFinanceTab();
+  openPanelDialog(financeModal, event.currentTarget);
+});
+$("#closeFinance").addEventListener("click", () => { closePanelDialog(financeModal); flushPendingArrivalFocus(); });
+document.querySelectorAll("[data-finance-tab]").forEach((button) => button.addEventListener("click", () => {
+  activeFinanceTab = button.dataset.financeTab;
+  applyFinanceTab();
+}));
+[rankingModal, financeModal].forEach((modal) => modal.addEventListener("click", (event) => {
+  if (event.target === modal) { closePanelDialog(modal); flushPendingArrivalFocus(); }
+}));
 
 animationPreference.value = window.localStorage.getItem("tour_animation_preference") || "full";
 animationPreference.addEventListener("change", () => {
   window.localStorage.setItem("tour_animation_preference", animationPreference.value);
-});
-$("#animationMuted").checked = window.localStorage.getItem("tour_animation_muted") !== "false";
-$("#animationMuted").addEventListener("change", (event) => {
-  window.localStorage.setItem("tour_animation_muted", String(event.target.checked));
 });
 $("#skipAnimation").addEventListener("click", () => animationController.skip());
 $("#skipEventReveal").addEventListener("click", () => {
@@ -1153,10 +1491,26 @@ $("#skipEventReveal").addEventListener("click", () => {
 $("#skipEconomicAnimation").addEventListener("click", () => animationController.skip());
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !buildConfirmModal.hidden) closeBuildConfirmation();
+  if (!buildConfirmModal.hidden) {
+    trapConfirmationFocus(event, buildConfirmModal);
+    if (event.key === "Escape") closeBuildConfirmation();
+  } else if (!$("#actionConfirmModal").hidden) {
+    trapConfirmationFocus(event, $("#actionConfirmModal"));
+    if (event.key === "Escape") closeActionConfirmation();
+  } else if (!financeModal.hidden) {
+    trapConfirmationFocus(event, financeModal);
+    if (event.key === "Escape") { closePanelDialog(financeModal); flushPendingArrivalFocus(); }
+  } else if (!rankingModal.hidden) {
+    trapConfirmationFocus(event, rankingModal);
+    if (event.key === "Escape") { closePanelDialog(rankingModal); flushPendingArrivalFocus(); }
+  }
 });
 window.addEventListener("popstate", () => {
   if (!buildConfirmModal.hidden) closeBuildConfirmation();
+  if (!$("#actionConfirmModal").hidden) closeActionConfirmation();
+  if (!financeModal.hidden) closePanelDialog(financeModal);
+  if (!rankingModal.hidden) closePanelDialog(rankingModal);
+  flushPendingArrivalFocus();
 });
 
 window.addEventListener("orientationchange", () => window.requestAnimationFrame(() => scheduleRefresh(true)));
