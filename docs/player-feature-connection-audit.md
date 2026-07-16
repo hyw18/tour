@@ -1,10 +1,13 @@
 # 플레이어 기능 연결 조사
 
-분석 기준 HEAD는 `bd3d295fc1eb7eecb668492f6aa5f2e8c34619e2`이다. 이 문서는
+분석 기준 HEAD는 `5cf5b6a8edd0ac27f40efb262cec87cea381107c`이다. 이 문서는
 `game/routes.py`, `game/engine.py`, `templates/player.html`, `static/js/player.js`,
 `game/bots.py`를 실제 테스트와 함께 대조한 결과를 기록한다.
 
 ## 기능 매트릭스
+
+현재 플레이어 화면은 서버의 `allowed_actions`, `next_action_message`, `action_priority`를
+단일 기준으로 사용한다. `turnTitle`은 현재 턴 주체만, `mainGuide`는 다음 행동만 표시한다.
 
 | 기능 | 백엔드 | API | 작업 전 플레이어 UI | 구현 상태 | 작업 전 문제 / 현재 조치 |
 |---|---|---|---|---|---|
@@ -39,6 +42,20 @@
 | 부분 보드 갱신 | UNIT_TESTED | 40칸 최초 생성 후 클래스·텍스트·말만 갱신 |
 | 적응형 폴링 | UNIT_TESTED | 중복 방지, AbortController, visibility/pageshow 처리 |
 | 실제 스마트폰 2~4대 | REAL_DEVICE_TEST_REQUIRED | 현재 실행 환경에서 물리 기기 검증 불가 |
+| 호스트 1·플레이어 4 Chromium | BROWSER_TESTED | 독립 컨텍스트 입장·도움말·구매·건설·재무·재접속·회전, 콘솔/500 오류 0 |
+
+## 최신 플레이어 사용성 감사
+
+| 연결 | 상태 | 현재 구현 |
+|---|---|---|
+| 도착 카드 → 행동 | BROWSER_TESTED | 명령 영역과 같은 `invokeAction`, `actionInFlight`, 멱등 요청 사용 |
+| 현재 방문비용 | UNIT_TESTED | 네 식별자가 현재 도착과 일치하는 지출만 합산 |
+| 건설 선택 | BROWSER_TESTED | 서버가 허용한 때만 표시, placeholder 후 명시 선택 |
+| 비활성 사유 | BROWSER_TESTED | 접힌 “다른 행동” 안의 터치 가능한 사유와 status 도움말 |
+| 재무 탭 | BROWSER_TESTED | 자산·세금·대출·최근 내역 독립 렌더와 ARIA 탭 |
+| 자산 관리 이동 | BROWSER_TESTED | 상세 선택 후 명시 버튼, 모달 닫기, 선택 유지, 포커스 이동 |
+| 최초·상황별 도움말 | BROWSER_TESTED | 확인 여부와 설정만 localStorage 저장 |
+| 개발자 규칙 문구 | CODE_PRESENT | 플레이어 상단/이벤트에서 제거, 계산과 호스트 규칙 상태 유지 |
 
 ## 주사위·이벤트 화면 연출
 
@@ -64,7 +81,7 @@
 | 관련 자산 강조 | UNIT_TESTED | region/building/special/finance/refund data 식별자 사용 |
 | 이벤트 탭 | UNIT_TESTED | 서버 제목·대상·phase·진행률·현재/최대 효과 사용, 내부 ID 미표시 |
 | 최근 수익·지출 | UNIT_TESTED | 중앙 display_name, 라운드·턴·지역·상대·건물 메타데이터 |
-| 실제 브라우저 포커스·레이아웃 | REAL_DEVICE_TEST_REQUIRED | Chromium `libnspr4.so` 부재 및 물리 기기 미연결 |
+| 실제 브라우저 포커스·레이아웃 | BROWSER_TESTED | Chromium 독립 컨텍스트 실행; 물리 기기는 별도 필수 |
 
 ## 경계 규칙 확인
 

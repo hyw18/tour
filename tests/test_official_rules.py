@@ -58,7 +58,7 @@ def test_official_rules_schema_version_authority_and_unique_ids():
         "code",
         "tests",
     ]
-    assert len(ids) == len(set(ids)) == 106
+    assert len(ids) == len(set(ids)) == 110
     assert all(RULE_ID_PATTERN.fullmatch(rule_id) for rule_id in ids)
     assert {item["rule_id"] for item in rules["unresolved"]} == {
         "TAX-005",

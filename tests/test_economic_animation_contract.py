@@ -136,8 +136,10 @@ def test_build_confirmation_route_executes_once_and_returns_economic_action():
     engine = app.config["GAME_ENGINE"]
     engine.set_forced_dice(1)
     client.post("/api/roll", json={"player_id": player["id"]}, headers=headers("roll"))
+    client.post("/api/turn-step/presentation-complete", json={"player_id": player["id"]}, headers=headers("arrival-complete"))
     purchase = client.post("/api/purchase-land", json={"player_id": player["id"]}, headers=headers("purchase"))
     assert purchase.get_json()["economic_action"]["action_type"] == "land_purchase"
+    client.post("/api/turn-step/presentation-complete", json={"player_id": player["id"]}, headers=headers("purchase-complete"))
     preview = client.get(f"/api/player/{player['id']}/build-preview?region_id=gimcheon&building_type=residential").get_json()
     body = {
         "player_id": player["id"], "game_instance_id": preview["game_instance_id"],

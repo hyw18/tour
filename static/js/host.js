@@ -152,6 +152,14 @@ function renderConfig(config) {
   document.querySelector("#totalSlots").value = String(config.total_slots);
   document.querySelector("#totalRounds").value = String(config.total_rounds);
   document.querySelector("#turnLimit").value = config.turn_limit_seconds == null ? "unlimited" : String(config.turn_limit_seconds);
+  document.querySelector("#stepTimePreset").value = config.step_time_preset || "default";
+  document.querySelector("#turnTotalLimit").value = config.turn_total_limit_seconds == null ? "unlimited" : String(config.turn_total_limit_seconds);
+  document.querySelector("#reconnectGrace").value = String(config.reconnect_grace_seconds || 0);
+  document.querySelectorAll("[data-step-limit]").forEach((input) => {
+    const value = config.step_time_limits?.[input.dataset.stepLimit];
+    if (value != null) input.value = String(value);
+  });
+  document.querySelector("#customStepTimes").hidden = config.step_time_preset !== "custom";
   document.querySelector("#botDelay").value = String(config.bot_action_delay);
   document.querySelector("#fastSimulation").checked = Boolean(config.fast_simulation);
   renderSlots(config.slot_types, config.bot_strategies);
@@ -165,7 +173,7 @@ function updateControlsForPhase(state) {
   const editable = ["setup", "lobby"].includes(phase) && !requestInFlight;
   const readySlots = new Set((state.players || []).filter((player) => player.status !== "exited").map((player) => player.slot_index));
   const allSlotsReady = readySlots.size === Number(state.config?.total_slots || 0);
-  document.querySelectorAll("#totalSlots,#totalRounds,#turnLimit,#botDelay,#fastSimulation,[data-slot-type]")
+  document.querySelectorAll("#totalSlots,#totalRounds,#turnLimit,#stepTimePreset,#turnTotalLimit,#reconnectGrace,#botDelay,#fastSimulation,[data-step-limit],[data-slot-type]")
     .forEach((element) => { element.disabled = !editable; });
   document.querySelectorAll("[data-bot-strategy]").forEach((element) => {
     const type = element.closest(".slot-row")?.querySelector("[data-slot-type]")?.value;
@@ -231,18 +239,27 @@ function configPayload() {
     bot_strategies: [...document.querySelectorAll("[data-bot-strategy]")].map((el) => el.value),
     total_rounds: Number(document.querySelector("#totalRounds").value),
     turn_limit_seconds: document.querySelector("#turnLimit").value,
+    step_time_preset: document.querySelector("#stepTimePreset").value,
+    turn_total_limit_seconds: document.querySelector("#turnTotalLimit").value,
+    reconnect_grace_seconds: Number(document.querySelector("#reconnectGrace").value),
+    step_time_limits: Object.fromEntries([...document.querySelectorAll("[data-step-limit]")].map((input) => [input.dataset.stepLimit, Number(input.value)])),
     bot_action_delay: Number(document.querySelector("#botDelay").value),
     fast_simulation: document.querySelector("#fastSimulation").checked
   };
 }
 
 function normalizedConfig(config) {
+  const editableStepIds = [...document.querySelectorAll("[data-step-limit]")].map((input) => input.dataset.stepLimit);
   return {
     total_slots: Number(config.total_slots),
     total_rounds: Number(config.total_rounds),
     slot_types: [...config.slot_types],
     bot_strategies: [...config.bot_strategies],
     turn_limit_seconds: ["unlimited", "none", ""].includes(String(config.turn_limit_seconds)) ? null : Number(config.turn_limit_seconds),
+    step_time_preset: config.step_time_preset || "default",
+    turn_total_limit_seconds: ["unlimited", "none", ""].includes(String(config.turn_total_limit_seconds)) ? null : Number(config.turn_total_limit_seconds),
+    reconnect_grace_seconds: Number(config.reconnect_grace_seconds || 0),
+    step_time_limits: Object.fromEntries(editableStepIds.map((key) => [key, config.step_time_limits?.[key] == null ? null : Number(config.step_time_limits[key])])),
     bot_action_delay: Number(config.bot_action_delay),
     fast_simulation: Boolean(config.fast_simulation),
   };
@@ -404,6 +421,11 @@ document.querySelector("#viewResults").addEventListener("click", () => {
 function handleConfigFormChange(event) {
   if (!event.target.matches("button")) {
     if (event.target.matches("#totalSlots")) renderSlots();
+    if (event.target.matches("#stepTimePreset")) {
+      document.querySelector("#customStepTimes").hidden = event.target.value !== "custom";
+      const totals = { fast: "60", default: "120", leisurely: "180", unlimited: "unlimited" };
+      if (totals[event.target.value]) document.querySelector("#turnTotalLimit").value = totals[event.target.value];
+    }
     updateDirtyFromForm();
   }
 }

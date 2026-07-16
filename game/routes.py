@@ -45,8 +45,44 @@ def debug_tools_enabled():
     return os.environ.get("DEBUG_GAME_TOOLS", "").lower() == "true" and current_app.config.get("APP_MODE") == "development"
 
 
+def user_facing_error(message):
+    text = str(message)
+    mappings = (
+        ("insufficient", "INSUFFICIENT_CASH", "현금이 부족해 이 행동을 완료할 수 없습니다."),
+        ("already used this visit", "VISIT_ACTION_USED", "이번 방문의 건물 편집 기회를 이미 사용했습니다."),
+        ("not current player", "NOT_YOUR_TURN", "현재 내 차례가 아닙니다."),
+        ("already rolled", "ALREADY_ROLLED", "이번 턴에는 이미 주사위를 굴렸습니다."),
+        ("game state changed", "STALE_STATE", "게임 상태가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도하세요."),
+        ("previous game instance", "RECONNECT_TOKEN_EXPIRED", "이전 게임이 종료되었습니다. 새 게임에 다시 입장하세요."),
+    )
+    lowered = text.lower()
+    for fragment, code, user_message in mappings:
+        if fragment in lowered:
+            return code, user_message
+    return "ACTION_NOT_ALLOWED", "현재 조건에서는 이 행동을 완료할 수 없습니다. 화면의 가능 조건을 확인하세요."
+
+
 def json_error(message, status=400):
-    return jsonify({"error": message}), status
+    error_code, user_message = user_facing_error(message)
+    return jsonify({"error": str(message), "error_code": error_code, "user_message": user_message}), status
+
+
+def action_user_message(path, pending_before, result):
+    region_id = pending_before.get("region_id")
+    region_name = engine().region_by_id(region_id)["name"] if region_id else None
+    messages = {
+        "/api/purchase-land": f"{region_name or '도착한'} 토지를 구매했습니다.",
+        "/api/purchase-special": "특수지역을 구매했습니다.",
+        "/api/decline-action": "이번 선택을 건너뛰었습니다.",
+        "/api/end-turn": "턴을 종료했습니다.",
+        "/api/revive": "부활하여 게임에 복귀했습니다.",
+        "/api/trade/land/propose": "토지 거래 제안을 보냈습니다. 상대방의 응답을 기다립니다.",
+        "/api/operating-right/transfer/propose": "운영권 양도 요청을 보냈습니다. 상대방의 응답을 기다립니다.",
+        "/api/usage-change/request": "용도 변경 요청을 보냈습니다. 승인 응답을 기다립니다.",
+    }
+    if path == "/api/roll" and isinstance(result, dict):
+        return f"주사위 {result.get('dice')}이 나왔습니다. 도착 칸을 확인하세요."
+    return messages.get(path, "행동을 완료했습니다.")
 
 
 def boolean_field(payload, name):
@@ -54,6 +90,13 @@ def boolean_field(payload, name):
     if not isinstance(value, bool):
         raise GameRuleError(f"{name} must be boolean")
     return value
+
+
+def require_allowed_turn_action(player_id, action_name):
+    player = engine()._find_player(player_id)
+    rule = engine()._allowed_actions(player) if player else None
+    if not rule or not rule.get(action_name, {}).get("allowed"):
+        raise GameRuleError((rule or {}).get(action_name, {}).get("reason") or "action is not allowed in the current turn step")
 
 
 def validate_idempotency_key(value):
@@ -111,6 +154,8 @@ def mutating_route(handler=None, *, allow_ended=False, bump_state=True, record_a
                             for event in result_events:
                                 event["state_version"] = engine().state.state_version
                             result["result_events"] = result_events
+                        result.setdefault("user_message", action_user_message(request.path, pending_before, result))
+                        result.setdefault("result_summary", result["user_message"])
                     return result
 
                 return jsonify(engine().with_idempotency(scoped_key, execute, signature))
@@ -338,6 +383,7 @@ def api_host_reset():
 def api_roll():
     payload = request.get_json(force=True, silent=True) or {}
     require_player(payload.get("player_id"))
+    require_allowed_turn_action(payload.get("player_id"), "roll")
     return engine().roll_dice(payload.get("player_id"))
 
 
@@ -346,8 +392,51 @@ def api_roll():
 def api_end_turn():
     payload = request.get_json(force=True, silent=True) or {}
     require_player(payload.get("player_id"))
+    require_allowed_turn_action(payload.get("player_id"), "end_turn")
     engine().end_turn(payload.get("player_id"))
     return views().public()
+
+
+@bp.post("/api/event/presentation/start")
+@mutating_route(bump_state=False, record_activity=False)
+def api_event_presentation_start():
+    payload = request.get_json(force=True, silent=True) or {}
+    require_player(payload.get("player_id"))
+    return engine().start_event_presentation(
+        payload.get("player_id"), payload.get("occurrence_id"), payload.get("stage", "animation")
+    )
+
+
+@bp.post("/api/event/presentation/revealed")
+@mutating_route(record_activity=False)
+def api_event_presentation_revealed():
+    payload = request.get_json(force=True, silent=True) or {}
+    require_player(payload.get("player_id"))
+    return engine().finish_event_presentation_animation(payload.get("player_id"), payload.get("occurrence_id"))
+
+
+@bp.post("/api/turn-step/presentation-complete")
+@mutating_route(record_activity=False)
+def api_turn_step_presentation_complete():
+    payload = request.get_json(force=True, silent=True) or {}
+    require_player(payload.get("player_id"))
+    return engine().complete_turn_presentation(payload.get("player_id"), payload.get("step_sequence"))
+
+
+@bp.post("/api/turn-step/build-phase")
+@mutating_route(record_activity=False)
+def api_turn_step_build_phase():
+    payload = request.get_json(force=True, silent=True) or {}
+    require_player(payload.get("player_id"))
+    return engine().enter_build_step(payload.get("player_id"), payload.get("step_id"))
+
+
+@bp.post("/api/turn-step/management-phase")
+@mutating_route(record_activity=False)
+def api_turn_step_management_phase():
+    payload = request.get_json(force=True, silent=True) or {}
+    require_player(payload.get("player_id"))
+    return engine().enter_management_step(payload.get("player_id"), payload.get("step_id"))
 
 
 @bp.post("/api/purchase-land")
@@ -355,6 +444,7 @@ def api_end_turn():
 def api_purchase_land():
     payload = request.get_json(force=True, silent=True) or {}
     require_player(payload.get("player_id"))
+    require_allowed_turn_action(payload.get("player_id"), "purchase_land")
     engine().purchase_land(payload.get("player_id"))
     return views().public()
 
@@ -364,6 +454,7 @@ def api_purchase_land():
 def api_decline_action():
     payload = request.get_json(force=True, silent=True) or {}
     require_player(payload.get("player_id"))
+    require_allowed_turn_action(payload.get("player_id"), "decline_action")
     engine().decline_pending_action(payload.get("player_id"))
     return views().public()
 
@@ -373,6 +464,7 @@ def api_decline_action():
 def api_build():
     payload = request.get_json(force=True, silent=True) or {}
     require_player(payload.get("player_id"))
+    require_allowed_turn_action(payload.get("player_id"), "build")
     engine().validate_build_confirmation(payload.get("player_id"), payload)
     engine().build_on_land(payload.get("player_id"), payload.get("building_type"))
     return views().public()
@@ -392,6 +484,7 @@ def api_sell_building():
 def api_purchase_special():
     payload = request.get_json(force=True, silent=True) or {}
     require_player(payload.get("player_id"))
+    require_allowed_turn_action(payload.get("player_id"), "purchase_special")
     engine().purchase_special_region(payload.get("player_id"))
     return views().public()
 

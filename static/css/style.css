@@ -1120,7 +1120,7 @@ summary { cursor: pointer; font-weight: 750; }
 /* Player HUD, arrival focus and private finance drawers */
 .player-screen .player-table {
   --player-hud-height: 64px;
-  padding-top: calc(var(--player-hud-height) + var(--safe-top) + 28px);
+  padding-top: calc(var(--player-hud-height) + var(--safe-top) + 6px);
 }
 
 .player-screen .player-topbar {
@@ -1243,20 +1243,6 @@ summary { cursor: pointer; font-weight: 750; }
 
 .timer-paused { color: var(--sapphire) !important; }
 
-.topbar-rule-notice {
-  position: fixed;
-  z-index: 44;
-  inset: calc(var(--safe-top) + var(--player-hud-height)) var(--safe-right) auto var(--safe-left);
-  height: 22px;
-  margin: 0;
-  padding: 3px 14px;
-  overflow: hidden;
-  background: rgba(26, 21, 10, .97);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .player-screen .player-layout {
   height: 100%;
 }
@@ -1298,6 +1284,63 @@ summary { cursor: pointer; font-weight: 750; }
   border-radius: 6px;
   background: rgba(37, 201, 143, .11);
 }
+
+.arrival-card-actions,
+.primary-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.arrival-card-actions .primary-action,
+.primary-actions .primary-action {
+  min-height: 50px;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.command-title { margin: 0 0 6px; color: var(--gold); font-size: 14px; }
+.other-actions { margin-top: 8px; border-top: 1px solid rgba(214, 177, 95, .18); padding-top: 7px; }
+.other-actions summary { min-height: 44px; cursor: pointer; color: var(--muted); font-weight: 800; }
+.unavailable-actions { display: grid; gap: 5px; }
+.unavailable-actions button { min-height: 44px; text-align: left; opacity: .78; }
+.unavailable-actions small { display: block; margin-top: 3px; color: var(--muted); }
+.disabled-action-help { min-height: 18px; margin-top: 6px; color: #ffd6a3; font-size: 11px; }
+.disabled-inline-reason { color: #ffd6a3; font-size: 11px; }
+.result-summary {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid rgba(37, 201, 143, .55);
+  border-radius: 9px;
+  background: linear-gradient(145deg, rgba(9, 37, 32, .96), rgba(10, 18, 30, .96));
+}
+.result-summary[hidden] { display: none; }
+
+.turn-step-indicator {
+  display: flex;
+  gap: .35rem;
+  padding: .35rem .75rem;
+  overflow-x: auto;
+  background: rgba(7, 18, 38, .92);
+  color: #aebbd1;
+  scrollbar-width: thin;
+}
+
+.turn-step-indicator span { white-space: nowrap; font-size: .78rem; opacity: .62; }
+.turn-step-indicator .completed { color: #86efac; opacity: 1; }
+.turn-step-indicator .current { color: #fff; font-weight: 800; opacity: 1; }
+.topbar-session #turnTimer { white-space: normal; line-height: 1.2; text-align: right; }
+.result-summary > strong { color: #caffeb; font-size: 14px; }
+.result-summary > span { color: var(--muted); font-size: 11px; }
+.result-summary > button { justify-self: end; min-width: 92px; }
+.command-zone button, .command-zone select, .panel-dialog button, .panel-dialog select, .panel-dialog input { min-height: 44px; }
+#buildingTypeField { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
+#buildingTypeField select { width: 100%; margin-top: 4px; }
+.asset-detail { margin-top: 12px; padding: 12px; border: 1px solid rgba(74, 163, 255, .4); border-radius: 8px; }
+.asset-row.selected { border-color: var(--sapphire); background: rgba(74, 163, 255, .13); }
 
 .arrival-card-emphasis { animation: arrival-card-pulse .6s ease-out; }
 .arrival-action-emphasis { animation: arrival-action-pulse .6s ease-out; }
@@ -1385,6 +1428,8 @@ summary { cursor: pointer; font-weight: 750; }
 .ranking-row > strong { color: var(--gold); }
 .ranking-row > span:nth-child(4) { color: #fff0bb; }
 .ranking-exited { opacity: .52; }
+.ranking-mine { border-color: var(--emerald); background: rgba(37, 201, 143, .11); }
+.ranking-help { margin: 0; color: var(--muted); font-size: 11px; }
 .rank-changed { animation: rank-change-pulse .6s ease-out; }
 
 .finance-tabs {
@@ -1397,8 +1442,7 @@ summary { cursor: pointer; font-weight: 750; }
 
 .finance-tabs button { flex: 0 0 auto; }
 .finance-tabs button.active { border-color: var(--sapphire); background: rgba(74, 163, 255, .17); }
-.finance-panel > h2 { margin: 0; font-size: 0; }
-.finance-panel > h2::after { content: "개인 상세 정보"; color: var(--gold); font-size: 16px; }
+.finance-panel > h2 { margin: 0 0 12px; color: var(--gold); font-size: 16px; }
 .finance-panel .asset-section:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
 
 @keyframes timer-alert { to { opacity: .55; } }
@@ -1422,8 +1466,7 @@ summary { cursor: pointer; font-weight: 750; }
 
 @media (max-height: 430px) and (orientation: landscape) {
   .player-screen .player-table { --player-hud-height: 56px; }
-  .topbar-rule-notice { height: 20px; padding-block: 2px; }
-  .player-screen .player-table { padding-top: calc(var(--player-hud-height) + var(--safe-top) + 24px); }
+  .player-screen .player-table { padding-top: calc(var(--player-hud-height) + var(--safe-top) + 4px); }
   .arrival-focus-card { min-height: 116px; }
 }
 

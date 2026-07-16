@@ -191,6 +191,13 @@ def test_four_independent_clients_complete_thirty_rounds_without_server_error():
         client = clients[player_id]
         roll = post(client, "/api/roll", {"player_id": player_id}, f"roll-{turn}", game_id)
         assert roll.status_code == 200
+        complete = post(client, "/api/turn-step/presentation-complete", {"player_id": player_id}, f"arrival-complete-{turn}", game_id)
+        assert complete.status_code == 200
+        private = client.get(f"/api/player/{player_id}/private").get_json()
+        if private["pending_action"]:
+            decline = post(client, "/api/decline-action", {"player_id": player_id}, f"decline-{turn}", game_id)
+            assert decline.status_code == 200
+            post(client, "/api/turn-step/presentation-complete", {"player_id": player_id}, f"decline-complete-{turn}", game_id)
         end = post(client, "/api/end-turn", {"player_id": player_id}, f"end-{turn}", game_id)
         assert end.status_code == 200
 
@@ -228,7 +235,9 @@ def test_one_hundred_concurrent_roll_purchase_build_and_trade_accept_execute_onc
         assert {response.status_code for response in results} == {200}
 
     concurrent_post("/api/roll", {"player_id": a["id"]}, "roll-100", extra_clients)
+    post(a_client, "/api/turn-step/presentation-complete", {"player_id": a["id"]}, "arrival-complete", game_id)
     concurrent_post("/api/purchase-land", {"player_id": a["id"]}, "purchase-100", extra_clients)
+    post(a_client, "/api/turn-step/presentation-complete", {"player_id": a["id"]}, "purchase-complete", game_id)
     preview = engine.build_preview(a["id"], "gimcheon", "residential")
     concurrent_post("/api/build", {
         "player_id": a["id"],
@@ -241,8 +250,10 @@ def test_one_hundred_concurrent_roll_purchase_build_and_trade_accept_execute_onc
     assert engine._find_player(a["id"]).cash_won == 8_400_000
     assert len(engine.state.buildings) == 1
 
+    post(a_client, "/api/turn-step/presentation-complete", {"player_id": a["id"]}, "build-complete", game_id)
     post(a_client, "/api/end-turn", {"player_id": a["id"]}, "end-a", game_id)
-    post(b_client, "/api/end-turn", {"player_id": b["id"]}, "end-b", game_id)
+    engine.force_end_current_turn()
+    engine._set_turn_step("MANAGEMENT_DECISION", "test_trade_configuration", player_id=a["id"])
     offer = post(a_client, "/api/trade/land/propose", {
         "requester_id": a["id"], "buyer_id": b["id"], "region_id": "gimcheon",
     }, "offer", game_id)

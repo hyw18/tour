@@ -51,18 +51,33 @@
               <input id="totalRounds" type="number" min="10" max="300" value="10">
             </label>
           </div>
-          <div class="advanced-settings" hidden aria-hidden="true">
-            <label>턴 제한
-              <select id="turnLimit">
-                <option value="15">15초</option>
-                <option value="30" selected>30초</option>
-                <option value="45">45초</option>
-                <option value="60">60초</option>
-                <option value="75">75초</option>
-                <option value="90">90초</option>
-                <option value="unlimited">무제한</option>
+          <details class="advanced-settings">
+            <summary>단계 시간·봇 고급 설정</summary>
+            <input id="turnLimit" type="hidden" value="30">
+            <label>단계 시간 프리셋
+              <select id="stepTimePreset">
+                <option value="fast">빠름</option><option value="default" selected>기본</option>
+                <option value="leisurely">여유</option><option value="custom">직접 설정</option>
+                <option value="unlimited">시간 제한 없음</option>
               </select>
             </label>
+            <label>턴 전체 선택시간 상한
+              <select id="turnTotalLimit"><option value="60">60초</option><option value="120" selected>120초</option><option value="180">180초</option><option value="unlimited">없음</option></select>
+            </label>
+            <label>단계별 재접속 유예
+              <select id="reconnectGrace"><option value="0" selected>사용 안 함</option><option value="5">5초·단계당 1회</option><option value="10">10초·단계당 1회</option></select>
+            </label>
+            <div id="customStepTimes" class="grid" hidden>
+              <label>주사위 <input data-step-limit="ROLL_DECISION" type="number" min="5" max="120" value="15"></label>
+              <label>토지 구매 <input data-step-limit="LAND_PURCHASE_DECISION" type="number" min="5" max="120" value="15"></label>
+              <label>특수지역 구매 <input data-step-limit="SPECIAL_PURCHASE_DECISION" type="number" min="5" max="120" value="15"></label>
+              <label>건설 여부 <input data-step-limit="BUILD_DECISION" type="number" min="5" max="120" value="20"></label>
+              <label>건물 유형 <input data-step-limit="BUILD_TYPE_SELECTION" type="number" min="5" max="120" value="20"></label>
+              <label>건설 확인 <input data-step-limit="BUILD_CONFIRMATION" type="number" min="5" max="120" value="20"></label>
+              <label>관리 <input data-step-limit="MANAGEMENT_DECISION" type="number" min="5" max="120" value="25"></label>
+              <label>거래 작성 <input data-step-limit="TRADE_CONFIGURATION" type="number" min="5" max="120" value="30"></label>
+              <label>턴 종료 <input data-step-limit="TURN_END_DECISION" type="number" min="5" max="120" value="10"></label>
+            </div>
             <label>봇 지연
               <select id="botDelay">
                 <option value="0">즉시</option>
@@ -72,7 +87,7 @@
               </select>
             </label>
             <label class="inline"><input id="fastSimulation" type="checkbox"> 애니메이션 생략</label>
-          </div>
+          </details>
           <div class="slot-table" role="table" aria-label="참가 슬롯">
             <div class="slot-header" role="row"><span>슬롯 번호</span><span>참가 유형</span><span>봇 전략</span><span>참가 상태</span></div>
             <div id="slots" class="slots" role="rowgroup"></div>

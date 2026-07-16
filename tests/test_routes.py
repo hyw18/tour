@@ -266,6 +266,7 @@ def test_player_purchase_and_build_routes_use_server_state(monkeypatch):
     post(client, "/api/dev/force-dice", {"dice": 1}, "dice")
     roll = post(client, "/api/roll", {"player_id": player["id"]}, "roll").get_json()
     assert roll["position"] == 1
+    post(client, "/api/turn-step/presentation-complete", {"player_id": player["id"]}, "arrival-complete")
     bought = post(client, "/api/purchase-land", {"player_id": player["id"]}, "buy").get_json()
     assert bought["land_ownership"]["gimcheon"] == player["id"]
 

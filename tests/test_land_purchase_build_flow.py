@@ -33,6 +33,7 @@ def arrive_and_buy(engine, player_id, cash_won=None):
     engine.roll_dice(player_id)
     land_price = engine.region_by_id("gimcheon")["land_price"]
     engine.purchase_land(player_id)
+    engine.complete_turn_presentation(player_id)
     return land_price
 
 
@@ -141,6 +142,7 @@ def test_post_purchase_management_is_blocked_and_visit_state_resets_next_turn():
         engine.propose_land_trade(player_id, players[1]["id"], "gimcheon")
     assert engine.player_private_state(player_id)["allowed_actions"]["manage"]["allowed"] is False
 
+    engine.decline_pending_action(player_id)
     engine.end_turn(player_id)
     assert engine.state.land_purchased_this_visit is False
     assert engine.state.successful_build_edit_this_visit is False

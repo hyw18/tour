@@ -8,6 +8,7 @@ let selectedCellIndex = null;
 let lastArrivalPosition = null;
 let pendingArrivalFocus = null;
 let activeFinanceTab = "assets";
+const financeScrollPositions = { assets: 0, tax: 0, loan: 0, history: 0 };
 let selectedBuildingId = null;
 let actionInFlight = false;
 let refreshInFlight = false;
@@ -15,7 +16,9 @@ let refreshController = null;
 let refreshTimer = null;
 let renderedStateVersion = -1;
 let refreshSequence = 0;
+let connectionHadError = false;
 let pendingSnapshot = null;
+let observedStepTimeoutSequence = null;
 let observedRollActionId = null;
 const queuedOccurrenceIds = new Set();
 const animationState = {
@@ -25,6 +28,74 @@ const animationState = {
   skippable: true,
   startedAt: null
 };
+const presentationPhases = Object.freeze({
+  ACTION_REQUEST: "ACTION_REQUEST", DICE_REVEAL: "DICE_REVEAL",
+  PIECE_MOVEMENT: "PIECE_MOVEMENT", ARRIVAL_REVEAL: "ARRIVAL_REVEAL",
+  ECONOMIC_RESULT: "ECONOMIC_RESULT", EVENT_REVEAL: "EVENT_REVEAL",
+  RESULT_SUMMARY: "RESULT_SUMMARY", PLAYER_DECISION: "PLAYER_DECISION",
+  TURN_COMPLETE: "TURN_COMPLETE"
+});
+const turnPresentationState = {
+  phase: presentationPhases.PLAYER_DECISION,
+  actionId: null,
+  stateVersion: null,
+  inputLocked: false,
+  lockReason: "",
+  canSkip: false
+};
+window.turnPresentationState = turnPresentationState;
+const presentationMetrics = new Map();
+window.turnPerformanceLog = [];
+
+function presentationMetric(actionId) {
+  if (!presentationMetrics.has(actionId)) {
+    presentationMetrics.set(actionId, { action_id: actionId, clicked_at: performance.now() });
+  }
+  return presentationMetrics.get(actionId);
+}
+
+function presentationScale() {
+  if (lastState?.config?.fast_simulation) return 0;
+  return ({ leisurely: 1.3, full: 1, fast: 0.6, minimal: 0 })[selectedAnimationMode()] ?? 1;
+}
+
+function scaledPresentationMs(milliseconds) {
+  return Math.round(milliseconds * presentationScale());
+}
+
+function setPresentationPhase(phase, { actionId = turnPresentationState.actionId, locked = true, reason = "결과를 표시하는 중입니다.", canSkip = true } = {}) {
+  Object.assign(turnPresentationState, { phase, actionId, inputLocked: locked, lockReason: locked ? reason : "", canSkip });
+  renderActionState();
+  if (locked) $("#disabledActionHelp").textContent = reason;
+}
+
+async function runPresentationScene(phase, actionId, minimumMs, reason, task = null) {
+  setPresentationPhase(phase, { actionId, locked: true, reason, canSkip: true });
+  const metric = presentationMetric(actionId);
+  metric.scene_order ||= [];
+  metric.scene_order.push(phase);
+  const started = performance.now();
+  if (task) await task();
+  const remaining = scaledPresentationMs(minimumMs) - (performance.now() - started);
+  if (remaining > 0) await animationController.wait(remaining);
+  metric[`${phase.toLowerCase()}_ms`] = Math.round(performance.now() - started);
+}
+
+function finishPresentation(actionId) {
+  const phase = lastState?.current_turn_player_id === playerId ? presentationPhases.PLAYER_DECISION : presentationPhases.TURN_COMPLETE;
+  setPresentationPhase(phase, { actionId, locked: false, reason: "", canSkip: false });
+  const metric = presentationMetric(actionId);
+  metric.dice_animation_ms ??= metric.dice_reveal_ms || 0;
+  metric.movement_ms ??= metric.piece_movement_ms || 0;
+  metric.arrival_hold_ms ??= metric.arrival_reveal_ms || 0;
+  metric.economic_animation_ms ??= metric.economic_result_ms || 0;
+  metric.input_enabled_after_ms = Math.round(performance.now() - metric.clicked_at);
+  metric.state_version = lastPrivate?.state_version ?? null;
+  window.turnPerformanceLog.push({ ...metric, scene_order: [...(metric.scene_order || [])] });
+  window.turnPerformanceLog = window.turnPerformanceLog.slice(-30);
+  if (document.body.dataset.appMode === "development") console.info(JSON.stringify(metric));
+  if (presentationMetrics.size > 30) presentationMetrics.delete(presentationMetrics.keys().next().value);
+}
 
 const $ = (selector) => document.querySelector(selector);
 const joinForm = $("#joinForm");
@@ -45,14 +116,18 @@ const tradeAction = $("#tradeAction");
 const reviveAction = $("#reviveAction");
 const boardGrid = $("#boardGrid");
 const arrivalPanel = $("#arrivalPanel");
-const assetPanel = $("#assetPanel");
+const assetPanel = $("#financeAssetsPanel");
+const financeTaxPanel = $("#financeTaxPanel");
+const financeLoanPanel = $("#financeLoanPanel");
+const financeHistoryPanel = $("#financeHistoryPanel");
 const eventPanel = $("#eventPanel");
-const settlementPanel = $("#settlementPanel");
+const settlementPanel = financeTaxPanel;
 const requestPanel = $("#requestPanel");
 const managementPanel = $("#managementPanel");
 const tradeModal = $("#tradeModal");
 const rankingModal = $("#rankingModal");
 const financeModal = $("#financeModal");
+const helpModal = $("#helpModal");
 const actionMessage = $("#actionMessage");
 const animationOverlay = $("#animationOverlay");
 const diceStage = $("#diceStage");
@@ -78,6 +153,13 @@ class AnimationSequenceController {
 
   enqueue(type, sequenceId, task) {
     return new Promise((resolve) => {
+      if (this.queue.length >= 10 && type === "dice") {
+        const expendableIndex = this.queue.findIndex((item) => item.type === "dice");
+        if (expendableIndex >= 0) {
+          const [compressed] = this.queue.splice(expendableIndex, 1);
+          compressed.resolve();
+        }
+      }
       this.queue.push({ type, sequenceId, task, resolve });
       this.drain();
     });
@@ -216,9 +298,30 @@ function action(name) {
 
 function configureActionButton(button, name) {
   const rule = action(name);
-  button.disabled = actionInFlight || animationState.playing || !rule.allowed;
-  button.title = rule.allowed ? "" : rule.reason;
-  button.dataset.disabledReason = rule.reason || "";
+  const presentationLocked = turnPresentationState.inputLocked;
+  button.disabled = actionInFlight || animationState.playing || presentationLocked || !rule.allowed;
+  const reason = presentationLocked ? turnPresentationState.lockReason : rule.reason;
+  button.title = rule.allowed && !presentationLocked ? "" : reason;
+  button.dataset.disabledReason = reason || "";
+  button.setAttribute("aria-describedby", "disabledActionHelp");
+}
+
+const actionElements = {
+  roll: () => $("#rollDice"), end_turn: () => $("#endTurn"),
+  purchase_land: () => purchaseLand, purchase_special: () => purchaseSpecial,
+  decline_action: () => declineAction, build: () => build,
+  manage: () => manageAction, trade: () => tradeAction, revive: () => reviveAction
+};
+
+function invokeAction(name, origin = null) {
+  const target = actionElements[name]?.();
+  if (!target || target.disabled || actionInFlight) {
+    const reason = action(name).reason || "현재 이 행동을 사용할 수 없습니다.";
+    $("#disabledActionHelp").textContent = reason;
+    return;
+  }
+  if (origin && origin !== target) target.dataset.invokedFrom = "arrival";
+  target.click();
 }
 
 function buildingSummary(state, cell) {
@@ -250,6 +353,7 @@ function selectedAnimationMode() {
 function animationDuration(full, fast) {
   const mode = selectedAnimationMode();
   if (mode === "minimal") return 0;
+  if (mode === "leisurely") return Math.round(full * 1.3);
   return mode === "fast" ? fast : full;
 }
 
@@ -280,7 +384,7 @@ async function playDiceAnimation(result) {
   showAnimationStage(diceStage);
   diceFace.classList.add("is-rolling");
   diceResultText.textContent = "주사위를 굴리는 중…";
-  const rollingTime = animationDuration(700, 280);
+  const rollingTime = animationDuration(850, 510);
   const started = performance.now();
   while (!animationController.skipRequested && performance.now() - started < rollingTime) {
     setDiceFace(1 + Math.floor(Math.random() * 6), "주사위를 굴리는 중…");
@@ -289,7 +393,7 @@ async function playDiceAnimation(result) {
   diceFace.classList.remove("is-rolling");
   setDiceFace(result.dice, `주사위 결과 ${result.dice}`);
   diceFace.classList.add("is-result");
-  await animationController.wait(animationDuration(300, 100));
+  await animationController.wait(animationDuration(350, 210));
 }
 
 function moveChipTo(playerIdToMove, position) {
@@ -308,8 +412,8 @@ async function playMovementAnimation(result) {
   if (!path.length || selectedAnimationMode() === "minimal" || animationController.skipRequested) {
     moveChipTo(result.player_id, result.to_position);
   } else {
-    const stepTime = path.length <= 3 ? 160 : 120;
-    const cappedStepTime = Math.min(stepTime, Math.floor(1500 / path.length));
+    const stepTime = animationDuration(path.length <= 3 ? 170 : 140, path.length <= 3 ? 102 : 84);
+    const cappedStepTime = Math.min(stepTime, Math.floor(scaledPresentationMs(1600) / path.length));
     for (const position of path) {
       if (animationController.skipRequested) break;
       document.querySelectorAll(".piece-moving-cell").forEach((cell) => cell.classList.remove("piece-moving-cell"));
@@ -322,19 +426,89 @@ async function playMovementAnimation(result) {
   document.querySelectorAll(".piece-moving-cell").forEach((cell) => cell.classList.remove("piece-moving-cell"));
   const arrival = boardGrid.querySelector(`[data-cell-index="${result.to_position}"]`);
   arrival?.classList.add("arrival-highlight");
-  await animationController.wait(animationDuration(260, 80));
+  await animationController.wait(animationDuration(180, 70));
   arrival?.classList.remove("arrival-highlight");
 }
 
 async function playDiceSequence(result) {
   try {
-    const previousPosition = lastPrivate?.player?.position ?? null;
-    await playDiceAnimation(result);
-    await playMovementAnimation(result);
+    const actor = lastState?.players?.find((player) => player.id === result.player_id);
+    if (actor?.is_bot && !lastState?.config?.fast_simulation) {
+      await runPresentationScene(presentationPhases.ACTION_REQUEST, result.action_id, 400, `${actor.nickname}의 턴을 준비하는 중입니다.`);
+    }
+    await runPresentationScene(presentationPhases.DICE_REVEAL, result.action_id, 1200, "주사위 결과를 표시하는 중입니다.", () => playDiceAnimation(result));
+    await runPresentationScene(presentationPhases.PIECE_MOVEMENT, result.action_id, 0, "말이 이동 중입니다.", () => playMovementAnimation(result));
+    await syncPresentationSnapshot(result.action_id);
+    const cell = lastState?.board?.[result.to_position];
+    const hasDecision = Boolean(lastPrivate?.pending_action);
+    const arrivalHold = cell?.type === "start" ? 1200 : cell?.type === "event" ? 500 : hasDecision ? 900 : 700;
+    await runPresentationScene(presentationPhases.ARRIVAL_REVEAL, result.action_id, arrivalHold, "도착 칸 결과를 확인하는 중입니다.", () => {
+      focusArrivalInformation(result.to_position, false);
+      presentationMetric(result.action_id).arrival_revealed_at_ms = Math.round(performance.now() - presentationMetric(result.action_id).clicked_at);
+    });
   } finally {
     setDiceFace(result.dice, `주사위 결과 ${result.dice}`);
     moveChipTo(result.player_id, result.to_position);
   }
+}
+
+async function syncPresentationSnapshot(actionId) {
+  setPresentationPhase(presentationPhases.ARRIVAL_REVEAL, { actionId, locked: true, reason: "최신 게임 상태를 동기화하는 중입니다." });
+  const snapshot = await getPlayerSnapshot();
+  if (!snapshot || snapshot.state_version < (lastPrivate?.state_version ?? -1)) return;
+  lastState = snapshot.public;
+  lastPrivate = snapshot.private;
+  const me = lastState.players.find((player) => player.id === playerId);
+  renderBoard(lastState, me);
+  renderMeters(lastState, me, lastPrivate);
+  renderInfoPanels(lastState, me, lastPrivate);
+  renderRankings(lastState);
+  renderTradeModal(lastState, lastPrivate);
+  applyInfoTabs();
+  renderActionState();
+  turnPresentationState.stateVersion = snapshot.state_version;
+  presentationMetric(actionId).allowed_actions_updated_at_ms = Math.round(performance.now() - presentationMetric(actionId).clicked_at);
+}
+
+async function completeServerPresentation(actionId) {
+  const step = lastPrivate?.turn_step;
+  if (!step || step.user_input_required || step.player_id !== playerId) return;
+  await postJson("/api/turn-step/presentation-complete", {
+    player_id: playerId,
+    step_sequence: step.step_sequence
+  });
+  await syncPresentationSnapshot(actionId);
+}
+
+async function showResultSummary(actionId, { title, detail = "", next = "", holdMs = 600, required = false } = {}) {
+  const summary = $("#resultSummary");
+  $("#resultSummaryTitle").textContent = title || "결과를 확인하세요.";
+  $("#resultSummaryDetail").textContent = detail;
+  $("#resultSummaryNext").textContent = next ? `다음 행동: ${next}` : "";
+  $("#continuePresentation").textContent = required ? "확인하고 계속" : "계속";
+  summary.hidden = false;
+  await runPresentationScene(presentationPhases.RESULT_SUMMARY, actionId, holdMs, "결과 요약을 확인하는 중입니다.");
+  if (required && selectedAnimationMode() !== "minimal" && !animationController.skipRequested) {
+    await new Promise((resolve) => {
+      const button = $("#continuePresentation");
+      const handler = () => { button.removeEventListener("click", handler); resolve(); };
+      button.addEventListener("click", handler);
+    });
+  }
+  summary.hidden = true;
+}
+
+function rollResultSummary(result) {
+  const cell = lastState?.board?.[result.to_position];
+  const expenses = lastPrivate?.current_arrival_expenses || [];
+  const paid = expenses.reduce((sum, item) => sum + item.amount_won, 0);
+  return {
+    title: `${cellName(cell) || "도착 칸"}에 도착했습니다.`,
+    detail: paid ? `이번 방문비용 ${money(paid)}원 · 현재 현금 ${money(lastPrivate?.player?.cash_won)}원` : `현재 현금 ${money(lastPrivate?.player?.cash_won)}원`,
+    next: lastPrivate?.next_action_message || "현재 가능한 행동을 확인하세요.",
+    holdMs: cell?.type === "start" ? 900 : 600,
+    required: cell?.type === "start"
+  };
 }
 
 function scopeName(scope) {
@@ -370,12 +544,19 @@ function fillEventCard(occurrence) {
 }
 
 async function revealEventOccurrence(occurrence) {
+  await postJson("/api/event/presentation/start", {
+    player_id: playerId, occurrence_id: occurrence.occurrence_id, stage: "animation"
+  }, { retryCount: 1 }).catch((error) => console.warn("Event animation timer exclusion unavailable", error));
   showAnimationStage(eventReveal);
   fillEventCard(occurrence);
   eventReveal.classList.remove("is-revealed");
-  await animationController.wait(animationDuration(320, 100));
+  const urgent = lastPrivate?.turn_remaining_seconds != null && lastPrivate.turn_remaining_seconds <= 10;
+  await animationController.wait(urgent ? 0 : animationDuration(220, 80));
   eventReveal.classList.add("is-revealed");
-  await animationController.wait(animationDuration(480, 120));
+  await postJson("/api/event/presentation/revealed", {
+    player_id: playerId, occurrence_id: occurrence.occurrence_id
+  }, { retryCount: 1 }).catch((error) => console.warn("Event animation timer resume unavailable", error));
+  await animationController.wait(urgent ? 0 : animationDuration(240, 80));
   await new Promise((resolve) => {
     const confirm = $("#confirmEvent");
     const cancel = () => {
@@ -385,6 +566,9 @@ async function revealEventOccurrence(occurrence) {
     const handler = async () => {
       confirm.disabled = true;
       try {
+        await postJson("/api/event/presentation/start", {
+          player_id: playerId, occurrence_id: occurrence.occurrence_id, stage: "acknowledgement"
+        }, { retryCount: 1 }).catch((error) => console.warn("Event acknowledgement timer exclusion unavailable", error));
         await postJson("/api/event/acknowledge", {
           player_id: playerId,
           occurrence_id: occurrence.occurrence_id,
@@ -407,6 +591,7 @@ async function revealEventOccurrence(occurrence) {
 }
 
 function enqueuePendingEvents(privateData) {
+  if (turnPresentationState.inputLocked) return;
   const remembered = rememberedOccurrences().values;
   (privateData?.pending_event_occurrences || []).forEach((occurrence) => {
     if (remembered.has(occurrence.occurrence_id) || queuedOccurrenceIds.has(occurrence.occurrence_id)) return;
@@ -472,6 +657,10 @@ function economicIconFor(action) {
 
 async function playEconomicAction(action) {
   showAnimationStage(economicStage);
+  if (action.action_type === "start_settlement" && action.settlement?.settlement_steps) {
+    await playSettlementSequence(action.settlement);
+    return;
+  }
   $("#economicIcon").textContent = economicIconFor(action);
   const regionId = action.region_id || action.asset_changes?.find((item) => item.region_id)?.region_id;
   const regionCell = regionId ? boardCellForRegion(lastState, regionId) : null;
@@ -484,9 +673,12 @@ async function playEconomicAction(action) {
   $("#economicTransfer").textContent = payers.length && recipients.length ? `${payers.join(", ")} → ${recipients.join(", ")}` : "";
   for (const change of changes) {
     if (animationController.skipRequested) break;
-    $("#economicAmount").textContent = `${change.amount_won > 0 ? "+" : ""}${money(change.amount_won)}원`;
-    $("#economicAmount").className = change.amount_won >= 0 ? "income" : "expense";
     $("#economicReason").textContent = `${playerName(lastState, change.player_id)} · ${economicReasonNames[change.reason] || change.reason}`;
+    $("#economicAmount").textContent = "금액을 확인하는 중…";
+    $("#economicAmount").className = "";
+    await animationController.wait(animationDuration(180, 100));
+    $("#economicAmount").textContent = `${change.amount_won > 0 ? "+" : ""}${money(change.amount_won)}원 ${change.amount_won >= 0 ? "수익" : "지급"}`;
+    $("#economicAmount").className = change.amount_won >= 0 ? "income" : "expense";
     if (change.player_id === playerId) {
       await animateCashCounter($("[data-current-cash]"), change.cash_before_won, change.cash_after_won);
     } else {
@@ -522,12 +714,37 @@ async function playEconomicAction(action) {
   affectedRows.forEach((row) => row.classList.remove("asset-change-highlight", "asset-removing"));
 }
 
+async function playSettlementSequence(settlement) {
+  const steps = (settlement.settlement_steps || []).filter((step) => step.amount_won || ["taxable_income", "final_cash"].includes(step.type));
+  $("#economicIcon").textContent = "정산";
+  $("#economicTransfer").textContent = `정산 전 현금 ${money(settlement.cash_before)}원`;
+  for (const step of steps) {
+    if (animationController.skipRequested) break;
+    $("#economicReason").textContent = step.label;
+    $("#economicAmount").textContent = "계산 결과를 확인하는 중…";
+    $("#economicAmount").className = "";
+    await animationController.wait(animationDuration(160, 95));
+    $("#economicAmount").textContent = `${step.amount_won > 0 ? "+" : ""}${money(step.amount_won)}원`;
+    $("#economicAmount").className = step.amount_won >= 0 ? "income" : "expense";
+    await animationController.wait(animationDuration(260, 155));
+  }
+  $("#economicReason").textContent = "출발지 정산 완료";
+  $("#economicAmount").textContent = `현재 현금 ${money(settlement.cash_after)}원`;
+  $("#economicAmount").className = "income";
+  $("#economicTransfer").textContent = `총수익 ${money(settlement.total_income_won)}원 · 총지출 ${money(settlement.total_expense_won)}원`;
+}
+
 function enqueueEconomicAction(action) {
   if (!action?.action_id || queuedEconomicActionIds.has(action.action_id) || economicSeenStore().values.has(action.action_id)) return Promise.resolve();
   if (action.game_instance_id !== storedGameInstanceId) return Promise.resolve();
   queuedEconomicActionIds.add(action.action_id);
   return animationController.enqueue("economic", action.action_id, async () => {
-    try { await playEconomicAction(action); }
+    try {
+      const changes = action.cash_changes || [];
+      const transfer = changes.some((change) => change.counterparty_player_id) || changes.filter((change) => change.amount_won < 0).length && changes.filter((change) => change.amount_won > 0).length;
+      const minimum = action.action_type === "start_settlement" ? 4000 : changes.length >= 5 ? 1500 : changes.length > 1 ? 350 * changes.length : transfer ? 1000 : 750;
+      await runPresentationScene(presentationPhases.ECONOMIC_RESULT, action.action_id, minimum, "경제 결과를 표시하는 중입니다.", () => playEconomicAction(action));
+    }
     finally {
       rememberEconomicAction(action.action_id);
       queuedEconomicActionIds.delete(action.action_id);
@@ -540,6 +757,7 @@ function enqueueEconomicAction(action) {
 }
 
 function enqueuePendingEconomicActions(privateData, publicActions = []) {
+  if (turnPresentationState.inputLocked) return;
   const cursor = privateData?.animation_cursor ?? privateData?.latest_economic_sequence ?? 0;
   const actionsById = new Map();
   [...(privateData?.unread_economic_actions || []), ...publicActions]
@@ -634,13 +852,42 @@ async function getPlayerSnapshot(signal) {
   if (response.status === 403 && await reconnectPlayer(signal)) {
     return getPlayerSnapshot(signal);
   }
-  if (!response.ok) return null;
+  if (!response.ok) throw new Error("서버에 연결할 수 없습니다. 자동으로 다시 연결하는 중입니다.");
   return response.json();
+}
+
+function contextualHelpEnabled() {
+  return window.localStorage.getItem("tour_context_help_enabled") !== "false";
+}
+
+function showFirstHelpIfNeeded() {
+  if (!playerId || window.localStorage.getItem("tour_help_intro_seen") || !contextualHelpEnabled()) return;
+  openPanelDialog(helpModal, $("#replayHelp"));
+}
+
+function markHelpSeen() {
+  window.localStorage.setItem("tour_help_intro_seen", "true");
+}
+
+function maybeShowContextHint(privateData) {
+  if (!contextualHelpEnabled()) return;
+  const pending = privateData?.pending_action;
+  const hintByType = {
+    purchase_land: "도움말: 토지를 구매하면 같은 방문에서 건물 1채를 지을 수 있습니다.",
+    build: "도움말: 건물 유형마다 수익이 발생하는 방식이 다릅니다. 유형을 선택해 상세 조건을 확인하세요."
+  };
+  const key = pending?.type ? `tour_help_${pending.type}_seen` : null;
+  if (key && hintByType[pending.type] && !window.localStorage.getItem(key)) {
+    showMessage(hintByType[pending.type]);
+    window.localStorage.setItem(key, "true");
+  }
 }
 
 function renderMeters(state, me, privateData) {
   const privatePlayer = privateData?.player || me;
-  const remaining = privateData?.turn_remaining_seconds;
+  const step = privateData?.turn_step || state.turn_step;
+  const remaining = step?.remaining_seconds;
+  const totalRemaining = privateData?.turn_total_remaining_seconds ?? state.turn_total_remaining_seconds;
   const current = state.players.find((player) => player.id === state.current_turn_player_id);
   const isMyTurn = state.current_turn_player_id === playerId;
   topbarCash.textContent = `${money(privatePlayer.cash_won)}원`;
@@ -649,17 +896,55 @@ function renderMeters(state, me, privateData) {
   if (state.paused) {
     turnTimer.textContent = "일시중지";
     turnTimer.classList.add("timer-paused");
+  } else if (step && !step.user_input_required) {
+    turnTimer.textContent = `${step.label} · 제한시간 정지${totalRemaining == null ? "" : ` · 전체 최대 ${Math.ceil(totalRemaining)}초`}`;
+    turnTimer.classList.add("timer-paused");
   } else if (remaining == null) {
-    turnTimer.textContent = "시간 제한 없음";
+    turnTimer.textContent = `${step?.label || "현재 단계"} · 시간 제한 없음`;
   } else {
     const seconds = Math.max(0, Math.ceil(remaining));
-    turnTimer.textContent = `${seconds <= 5 ? "긴급 · " : seconds <= 10 ? "주의 · " : ""}${seconds}초`;
+    const owner = step?.player_id && step.player_id !== playerId ? `${current?.nickname || "다른 플레이어"} · ` : "";
+    turnTimer.textContent = `${owner}${step?.label || "현재 단계"} · ${seconds <= 5 ? "긴급 · " : seconds <= 10 ? "주의 · " : ""}${seconds}초${totalRemaining == null ? "" : ` · 전체 최대 ${Math.ceil(totalRemaining)}초`}`;
     if (seconds <= 5) turnTimer.classList.add("timer-critical");
     else if (seconds <= 10) turnTimer.classList.add("timer-warning");
   }
-  mainGuide.textContent = isMyTurn
-    ? (privateData?.pending_action ? "내 턴 · 도착 칸에서 행동을 선택하세요." : "내 턴 · 가능한 행동을 확인하세요.")
-    : `${current?.nickname || "다음 플레이어"} 차례를 기다리는 중`;
+  mainGuide.textContent = privateData?.next_action_message
+    || (isMyTurn ? "현재 가능한 행동을 확인하세요." : `${current?.nickname || "다음 플레이어"}의 행동을 기다리는 중입니다.`);
+  renderTurnStepIndicator(state);
+  const timeout = privateData?.last_step_timeout;
+  if (timeout && timeout.step_sequence !== observedStepTimeoutSequence) {
+    observedStepTimeoutSequence = timeout.step_sequence;
+    showMessage(timeout.message, true);
+  }
+}
+
+function renderTurnStepIndicator(state) {
+  const indicator = $("#turnStepIndicator");
+  const current = state.turn_step;
+  if (!indicator || !current) {
+    if (indicator) indicator.replaceChildren();
+    return;
+  }
+  const completed = [];
+  (state.turn_step_history || []).forEach((item) => {
+    if (item.from_step && !completed.includes(item.from_step)) completed.push(item.from_step);
+  });
+  const actual = [...completed, current.step_id];
+  if (!["TURN_END_DECISION", "TURN_COMPLETE"].includes(current.step_id)) actual.push("TURN_END_DECISION");
+  const labels = {
+    ROLL_DECISION: "주사위", ROLL_RESOLUTION: "이동", ARRIVAL_PRESENTATION: "도착",
+    SETTLEMENT_PRESENTATION: "정산", LAND_PURCHASE_DECISION: "구매 선택",
+    SPECIAL_PURCHASE_DECISION: "특수지역 선택", BUILD_DECISION: "건설",
+    BUILD_TYPE_SELECTION: "유형 선택", BUILD_CONFIRMATION: "건설 확인",
+    MANAGEMENT_DECISION: "관리", TRADE_CONFIGURATION: "거래 작성",
+    EVENT_CONFIRMATION: "이벤트", RESULT_CONFIRMATION: "결과", TURN_END_DECISION: "턴 종료",
+    TURN_COMPLETE: "완료"
+  };
+  indicator.innerHTML = actual.map((stepId, index) => {
+    const isCurrent = stepId === current.step_id && index === actual.lastIndexOf(stepId);
+    const className = isCurrent ? "current" : index < actual.indexOf(current.step_id) ? "completed" : "upcoming";
+    return `<span class="${className}">${className === "completed" ? "✓ " : className === "current" ? "● " : ""}${escapeHtml(labels[stepId] || stepId)}</span>`;
+  }).join("");
 }
 
 function renderArrival(state, me, privateData) {
@@ -669,8 +954,10 @@ function renderArrival(state, me, privateData) {
   const region = state.regions?.find((item) => item.id === cell?.region_id);
   const special = state.special_region_details?.[cell?.special_region_id];
   const ownerId = cell?.region_id ? state.land_ownership[cell.region_id] : state.special_ownership?.[cell?.special_region_id];
-  const recentVisitExpense = (privateData?.recent_expenses || []).slice().reverse()
-    .find((item) => item.region_id === cell?.region_id && ["land_fee", "building_visit_fee"].includes(item.source));
+  const arrivalExpenses = isActualArrival ? (privateData?.current_arrival_expenses || []) : [];
+  const currentVisitExpense = arrivalExpenses
+    .filter((item) => item.region_id === cell?.region_id && ["land_fee", "building_visit_fee"].includes(item.source))
+    .reduce((sum, item) => sum + item.amount_won, 0);
   const pending = isActualArrival ? privateData?.pending_action : null;
   const purchaseRule = privateData?.allowed_actions?.purchase_land;
   const buildRule = privateData?.allowed_actions?.build;
@@ -694,6 +981,13 @@ function renderArrival(state, me, privateData) {
       .map(([name]) => ({ purchase_land: "토지 구매", purchase_special: "특수지역 구매", build: "건설", manage: "관리", trade: "거래", decline_action: "포기" })[name])
       .filter(Boolean)
     : [];
+  const arrivalActionNames = isActualArrival
+    ? (privateData?.action_priority?.primary || []).filter((name) => ["purchase_land", "purchase_special", "decline_action", "build", "manage", "trade"].includes(name))
+    : [];
+  const actionLabels = {
+    purchase_land: "토지 구매", purchase_special: "특수지역 구매", decline_action: pending?.type === "build" ? "이번 방문 건설하지 않기" : pending?.type === "purchase_special" ? "특수지역 구매 포기" : "토지 구매 포기",
+    build: "건설", manage: "관리", trade: "거래"
+  };
   const lastSettlement = privateData?.last_settlement;
   const settlementLedger = lastSettlement?.ledger || privateData?.ledger || {};
   const typeDetails = cell?.type === "event"
@@ -709,45 +1003,52 @@ function renderArrival(state, me, privateData) {
     <span class="arrival-context">${isActualArrival ? "도착 칸" : "선택한 칸 · 행동은 실제 도착 칸 기준"}</span>
     <h2>${escapeHtml(cellName(cell) || "대기")}</h2>
     <p>${escapeHtml(cellTypeName)}</p>
-    ${region ? `<div class="detail-list"><span>토지가 ${money(region.land_price)}원</span><span>소유자 ${escapeHtml(ownerId ? playerName(state, ownerId) : "없음")}</span><span>${escapeHtml(buildingSummary(state, cell) || "건물 없음")}</span><span>${recentVisitExpense ? `최근 서버 확정 방문비용 ${money(recentVisitExpense.amount_won)}원` : "방문비용·방문료는 서버의 실제 건물과 이벤트 판정 후 확정됩니다."}</span></div>` : ""}
-    ${special ? `<div class="special-sheet"><span>최초 가격 ${money(special.initial_price_won)}원</span><span>현재 가치 ${money(special.current_value_won)}원</span><span>타인 방문 ${special.external_visits}회 · 다음 상승 ${money(special.next_increase_won)}원</span><span>소유자 ${escapeHtml(playerName(state, ownerId))}</span><span>강제매각 ${money(special.forced_sale_min_won)}~${money(special.forced_sale_max_won)}원</span></div>` : ""}
+    ${region ? `<div class="detail-list arrival-details"><span>소유자 ${escapeHtml(ownerId ? playerName(state, ownerId) : "없음")}</span><strong>${currentVisitExpense ? `이번 방문비용 ${money(currentVisitExpense)}원` : "이번 방문에 확정된 비용 없음"}</strong><span>토지가 ${money(region.land_price)}원</span><span>${escapeHtml(buildingSummary(state, cell) || "건물 없음")}</span></div>` : ""}
+    ${special ? `<div class="special-sheet"><span>소유자 ${escapeHtml(ownerId ? playerName(state, ownerId) : "없음")}</span><strong>현재 가치 ${money(special.current_value_won)}원</strong><span>최초 가격 ${money(special.initial_price_won)}원 · 다음 상승 ${money(special.next_increase_won)}원</span><span>강제매각 ${money(special.forced_sale_min_won)}~${money(special.forced_sale_max_won)}원</span></div>` : ""}
     ${typeDetails}${purchaseDetails}${buildDetails}
-    ${isActualArrival ? `<div class="arrival-actions-summary"><strong>가능한 행동</strong><span>${escapeHtml(availableActions.join(" · ") || "즉시 선택할 행동 없음")}</span></div>` : ""}
+    ${arrivalActionNames.length ? `<div class="arrival-card-actions">${arrivalActionNames.map((name) => `<button type="button" data-arrival-action="${name}" class="${name === "decline_action" ? "secondary-action" : "primary-action"}">${escapeHtml(actionLabels[name])}</button>`).join("")}</div>` : ""}
+    ${isActualArrival ? `<div class="arrival-actions-summary"><strong>현재 가능한 행동</strong><span>${escapeHtml(availableActions.join(" · ") || "즉시 선택할 행동 없음")}</span></div>` : ""}
   `;
+  arrivalPanel.querySelectorAll("[data-arrival-action]").forEach((button) => {
+    button.addEventListener("click", () => invokeAction(button.dataset.arrivalAction, button));
+  });
 }
 
 function renderAssets(state, privateData) {
-  const previousScroll = $("#financeScroll")?.scrollTop || 0;
   const assets = privateData?.assets || { lands: [], buildings: [], special_regions: [] };
   const ledger = privateData?.ledger || {};
   const loan = privateData?.loan;
   const refunds = privateData?.pending_commercial_sale_refunds || [];
+  const selectedBuilding = assets.buildings.find((item) => item.id === selectedBuildingId);
   const buildingRows = assets.buildings.map((building) => `
-    <button class="asset-row" type="button" data-building-select="${escapeHtml(building.id)}" data-building-id="${escapeHtml(building.id)}" data-region-id="${escapeHtml(building.region_id)}">
+    <button class="asset-row ${building.id === selectedBuildingId ? "selected" : ""}" type="button" data-building-select="${escapeHtml(building.id)}" data-building-id="${escapeHtml(building.id)}" data-region-id="${escapeHtml(building.region_id)}">
       <strong>${escapeHtml(building.region_name)} · ${typeName(building.building_type)}</strong>
       <span>시세 ${money(building.adjusted_market_value_won)}원</span>
       <span>명목 ${escapeHtml(building.nominal_owner_name)} · 운영 ${escapeHtml(building.operator_name)}</span>
-      <span>체인 ${escapeHtml(building.ownership_chain_names.join(" → "))}</span>
       <span>${escapeHtml(building.return_rate_kind)} ${percent(building.return_rate_bps)}</span>
     </button>
   `).join("") || "<p>보유 건물이 없습니다.</p>";
   assetPanel.innerHTML = `
-    <h2>본인 자산현황</h2>
-    <section class="asset-section" data-finance-pane="tax" data-finance-section="tax"><h3>세금</h3><div class="detail-list"><span>과세소득 ${money(ledger.taxable_income)}원</span><span>세율 ${percent(privateData?.tax_rate_bps)}</span><span>${ledger.closed ? "확정" : "예상"} 세금 ${money(ledger.tax_due)}원</span></div></section>
-    <section class="asset-section" data-finance-pane="loan" data-finance-section="loan"><h3>대출</h3>${loan ? `<div class="detail-list"><span>원금 ${money(loan.principal_won)}원</span><span>남은 총상환액 ${money(loan.remaining_due_won)}원</span><span>이자 ${money(loan.interest_won)}원</span><span>마감까지 출발지 ${loan.due_laps_remaining}회 · 자동상환</span></div>` : "<p>대출 없음</p>"}</section>
-    <section class="asset-section" data-finance-pane="assets"><h3>일반토지 ${assets.lands.length}</h3><div class="asset-list">${assets.lands.map((land) => `<div class="asset-row" data-region-id="${escapeHtml(land.region_id)}">${escapeHtml(land.name)} (${money(land.land_price_won)}원)</div>`).join("") || "없음"}</div></section>
-    <section class="asset-section" data-finance-pane="assets"><h3>특수지역 ${assets.special_regions.length}</h3><div class="asset-list">${assets.special_regions.map((item) => `<div class="asset-row" data-special-region-id="${escapeHtml(item.special_region_id)}">${escapeHtml(item.name)} 최초 ${money(item.initial_price_won)} / 현재 ${money(item.current_value_won)}원</div>`).join("") || "없음"}</div></section>
-    <section class="asset-section" data-finance-pane="assets"><h3>건물·운영권 ${assets.buildings.length}</h3><div class="asset-list">${buildingRows}</div></section>
-    <section class="asset-section" data-finance-pane="history"><h3>상업 매각 예정 환급</h3><div class="asset-list">${refunds.map((item) => `<div class="asset-row" data-refund-region-id="${escapeHtml(item.region_id)}">${escapeHtml(regionName(state, item.region_id))} ${money(item.refund_won)}원</div>`).join("") || "없음"}</div></section>
-    <section class="asset-section" data-finance-pane="history"><h3>최근 수익·지출</h3><p>수익 ${(privateData?.recent_income || []).slice(-3).map((item) => `R${item.round ?? "-"} · ${escapeHtml(item.region_id ? `${regionName(state, item.region_id)} ` : "")}${escapeHtml(item.display_name || item.source)} +${money(item.amount_won)}원${item.counterparty_player_id ? ` · ${escapeHtml(playerName(state, item.counterparty_player_id))}` : ""}`).join("<br>") || "없음"}</p><p>지출 ${(privateData?.recent_expenses || []).slice(-3).map((item) => `R${item.round ?? "-"} · ${escapeHtml(item.region_id ? `${regionName(state, item.region_id)} ` : "")}${escapeHtml(item.display_name || item.source)} -${money(item.amount_won)}원${item.counterparty_player_id ? ` · ${escapeHtml(playerName(state, item.counterparty_player_id))}` : ""}`).join("<br>") || "없음"}</p></section>
+    <h2>내 자산</h2>
+    <section class="asset-section"><h3>일반토지 ${assets.lands.length}</h3><div class="asset-list">${assets.lands.map((land) => `<div class="asset-row" data-region-id="${escapeHtml(land.region_id)}">${escapeHtml(land.name)} · ${money(land.land_price_won)}원</div>`).join("") || "<p>보유 토지가 없습니다.</p>"}</div></section>
+    <section class="asset-section"><h3>특수지역 ${assets.special_regions.length}</h3><div class="asset-list">${assets.special_regions.map((item) => `<div class="asset-row" data-special-region-id="${escapeHtml(item.special_region_id)}">${escapeHtml(item.name)} · 현재 ${money(item.current_value_won)}원</div>`).join("") || "<p>보유 특수지역이 없습니다.</p>"}</div></section>
+    <section class="asset-section"><h3>건물·운영권 ${assets.buildings.length}</h3><div class="asset-list">${buildingRows}</div></section>
+    ${selectedBuilding ? `<section class="asset-detail"><h3>${escapeHtml(selectedBuilding.region_name)} · ${typeName(selectedBuilding.building_type)}</h3><p>소유·운영 체인 ${escapeHtml(selectedBuilding.ownership_chain_names.join(" → "))}</p><button id="manageSelectedAsset" type="button" ${selectedBuilding.can_sell || selectedBuilding.can_transfer || Object.values(selectedBuilding.usage_change_options || {}).some((option) => option.allowed) ? "" : "disabled"}>이 건물 관리하기</button><p class="disabled-inline-reason">${selectedBuilding.can_sell || selectedBuilding.can_transfer || Object.values(selectedBuilding.usage_change_options || {}).some((option) => option.allowed) ? "" : escapeHtml(selectedBuilding.sell_reason || "현재 위치에서는 이 건물을 관리할 수 없습니다.")}</p></section>` : ""}
   `;
+  financeLoanPanel.innerHTML = `<h2>대출</h2>${loan ? `<section class="asset-section" data-finance-section="loan"><div class="detail-list"><span>원금 ${money(loan.principal_won)}원</span><span>이자 ${money(loan.interest_won)}원</span><strong>남은 상환액 ${money(loan.remaining_due_won)}원</strong><span>만기까지 출발지 ${loan.due_laps_remaining}회</span><span>출발지 도착 시 자동상환</span></div></section>` : "<p>대출이 없습니다.</p>"}`;
+  financeHistoryPanel.innerHTML = `<h2>최근 내역</h2><section class="asset-section"><h3>수익</h3>${(privateData?.recent_income || []).slice(-5).reverse().map((item) => `<p>R${item.round ?? "-"} · ${escapeHtml(item.display_name || item.source)} +${money(item.amount_won)}원</p>`).join("") || "<p>최근 수익이 없습니다.</p>"}</section><section class="asset-section"><h3>지출</h3>${(privateData?.recent_expenses || []).slice(-5).reverse().map((item) => `<p>R${item.round ?? "-"} · ${escapeHtml(item.display_name || item.source)} -${money(item.amount_won)}원</p>`).join("") || "<p>최근 지출이 없습니다.</p>"}</section><section class="asset-section"><h3>예정 환급</h3>${refunds.map((item) => `<p data-refund-region-id="${escapeHtml(item.region_id)}">${escapeHtml(regionName(state, item.region_id))} ${money(item.refund_won)}원</p>`).join("") || "<p>예정된 환급이 없습니다.</p>"}</section>`;
   applyFinanceTab();
-  if ($("#financeScroll")) $("#financeScroll").scrollTop = previousScroll;
   assetPanel.querySelectorAll("[data-building-select]").forEach((button) => {
     button.addEventListener("click", () => {
       selectedBuildingId = button.dataset.buildingSelect;
-      renderManagement(state, privateData, "manage");
+      renderAssets(state, privateData);
     });
+  });
+  $("#manageSelectedAsset")?.addEventListener("click", () => {
+    closePanelDialog(financeModal);
+    renderManagement(state, privateData, "manage");
+    managementPanel.scrollIntoView({ block: "nearest" });
+    window.requestAnimationFrame(() => managementPanel.querySelector("button,select")?.focus());
   });
 }
 
@@ -763,7 +1064,9 @@ function renderSettlement(state, privateData) {
   const settlement = privateData?.last_settlement;
   const final = state.final_results;
   settlementPanel.innerHTML = `
-    <h2>${final ? "최종 정산" : "최근 출발지 정산"}</h2>
+    <h2>세금·정산</h2>
+    <section class="asset-section" data-finance-section="tax"><h3>현재 세금</h3><div class="detail-list"><span>과세소득 ${money(ledger.taxable_income)}원</span><span>세율 ${percent(privateData?.tax_rate_bps)}</span><strong>${ledger.closed ? "확정" : "예상"} 세금 ${money(ledger.tax_due)}원</strong></div></section>
+    <h3>${final ? "최종 정산" : "최근 출발지 정산"}</h3>
     ${settlement ? `<ol class="settlement-list"><li>수익 ${money(ledger.gross_income)}원</li><li>손실 ${money(ledger.losses)}원</li><li>세금 ${money(ledger.tax_due)}원</li><li>출발지 보너스 ${money(ledger.start_bonus)}원</li><li>대출 상환 ${money(ledger.loan_payment)}원</li><li>정산 후 현금 ${money(settlement.cash_after)}원</li></ol>` : "<p>아직 출발지 정산 기록이 없습니다.</p>"}
     ${final ? `<div class="callout sapphire">종료 사유 ${escapeHtml(final.reason)} · 내 순위 ${final.rankings?.[playerId] ?? "없음"} · 최종 자산 ${money(final.assets?.[playerId])}원</div>` : ""}
   `;
@@ -902,12 +1205,21 @@ function renderManagement(state, privateData, mode = "manage") {
     const target = others.find((item) => item.id === event.target.value);
     if ($("#rightPreview") && selected && target) $("#rightPreview").textContent = `현재 ${selected.ownership_chain_names.join(" → ")} · 양도 후 ${[...selected.ownership_chain_names, target.nickname].join(" → ")}`;
   });
-  managementPanel.querySelector("[data-close-management]").addEventListener("click", () => { managementPanel.hidden = true; });
+  managementPanel.querySelector("[data-close-management]").addEventListener("click", async () => {
+    managementPanel.hidden = true;
+    if (mode === "trade" && lastPrivate?.turn_step?.step_id === "TRADE_CONFIGURATION") {
+      try {
+        await postJson("/api/turn-step/management-phase", { player_id: playerId, step_id: "MANAGEMENT_DECISION" });
+        await syncPresentationSnapshot(lastPrivate?.current_arrival?.action_id || "management-return");
+      } catch (error) { showMessage(error.message, true); }
+    }
+  });
   managementPanel.querySelectorAll("[data-manage]").forEach((button) => button.addEventListener("click", () => manageRequest(button.dataset.manage, button)));
 }
 
 let rankingDialogOrigin = null;
 let financeDialogOrigin = null;
+let helpDialogOrigin = null;
 
 function renderRankings(state) {
   const list = $("#rankingList");
@@ -936,9 +1248,10 @@ function renderRankings(state) {
     }
     element.dataset.rank = String(row.rank);
     element.classList.toggle("ranking-exited", row.status === "exited");
+    element.classList.toggle("ranking-mine", row.player_id === playerId);
     element.innerHTML = `
       <strong>${escapeHtml(nextRank)}</strong>
-      <span>${escapeHtml(row.nickname)}${player.is_bot ? " · BOT" : ""}</span>
+      <span>${escapeHtml(row.nickname)}${row.player_id === playerId ? " · 나" : ""}${player.is_bot ? " · BOT" : ""}</span>
       <span>${escapeHtml(statusName(row.status))}</span>
       <span>공개 자산 ${money(row.total_asset_won)}원</span>
       <span>토지 ${(player.lands || []).length}</span>
@@ -948,13 +1261,22 @@ function renderRankings(state) {
 }
 
 function applyFinanceTab() {
-  document.querySelectorAll("[data-finance-tab]").forEach((button) => button.classList.toggle("active", button.dataset.financeTab === activeFinanceTab));
-  document.querySelectorAll("[data-finance-pane]").forEach((pane) => { pane.hidden = pane.dataset.financePane !== activeFinanceTab; });
+  const panels = { assets: assetPanel, tax: financeTaxPanel, loan: financeLoanPanel, history: financeHistoryPanel };
+  document.querySelectorAll("[data-finance-tab]").forEach((button) => {
+    const selected = button.dataset.financeTab === activeFinanceTab;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
+  Object.entries(panels).forEach(([name, panel]) => { panel.hidden = name !== activeFinanceTab; });
+  window.requestAnimationFrame(() => { if ($("#financeScroll")) $("#financeScroll").scrollTop = financeScrollPositions[activeFinanceTab] || 0; });
 }
 
 function openPanelDialog(modal, origin) {
+  if (!modal.hidden) return;
   if (modal === rankingModal) rankingDialogOrigin = origin;
   if (modal === financeModal) financeDialogOrigin = origin;
+  if (modal === helpModal) helpDialogOrigin = origin;
   modal.hidden = false;
   window.requestAnimationFrame(() => modal.querySelector("button")?.focus());
 }
@@ -963,6 +1285,7 @@ function closePanelDialog(modal) {
   modal.hidden = true;
   if (modal === rankingModal) { rankingDialogOrigin?.focus(); rankingDialogOrigin = null; }
   if (modal === financeModal) { financeDialogOrigin?.focus(); financeDialogOrigin = null; }
+  if (modal === helpModal) { helpDialogOrigin?.focus(); helpDialogOrigin = null; }
 }
 
 function applyInfoTabs() {
@@ -981,23 +1304,55 @@ function renderActionState() {
   configureActionButton(manageAction, "manage");
   configureActionButton(tradeAction, "trade");
   configureActionButton(reviveAction, "revive");
-  buildingType.disabled = actionInFlight || animationState.playing || !action("build").allowed;
+  const buildAllowed = action("build").allowed;
+  $("#buildingTypeField").hidden = !buildAllowed;
+  buildingType.disabled = actionInFlight || animationState.playing || !buildAllowed;
   const available = action("build").building_types || [];
   const options = action("build").building_options || {};
   Array.from(buildingType.options).forEach((option) => {
+    if (!option.value) return;
     const details = options[option.value];
     option.disabled = !available.includes(option.value);
     option.textContent = `${typeName(option.value)}${details ? ` · ${money(details.price_won)}원` : ""}`;
     option.title = details?.reason || "";
   });
-  if (buildingType.selectedOptions[0]?.disabled) {
-    const firstAvailable = Array.from(buildingType.options).find((option) => !option.disabled);
-    if (firstAvailable) buildingType.value = firstAvailable.value;
-  }
+  if (!buildAllowed) buildingType.value = "";
   const pendingType = lastPrivate?.pending_action?.type;
   declineAction.textContent = pendingType === "purchase_land"
     ? "토지 구매 포기"
-    : pendingType === "build" ? "이번 방문 건설하지 않기" : "포기";
+    : pendingType === "purchase_special" ? "특수지역 구매 포기"
+      : pendingType === "build" ? "이번 방문 건설하지 않기" : "현재 선택 취소";
+  const priorities = lastPrivate?.action_priority || { primary: [], secondary: [] };
+  const primary = new Set(priorities.primary || []);
+  const secondary = new Set(priorities.secondary || []);
+  Object.entries(actionElements).forEach(([name, getter]) => {
+    const button = getter();
+    if (!button) return;
+    const allowed = action(name).allowed;
+    button.hidden = !allowed;
+    button.classList.toggle("primary-action", primary.has(name));
+    button.classList.toggle("secondary-action", secondary.has(name));
+  });
+  (priorities.primary || []).forEach((name) => {
+    if (name === "build") $("#primaryActions").append($("#buildingTypeField"));
+    const button = actionElements[name]?.();
+    if (button) $("#primaryActions").append(button);
+  });
+  (priorities.secondary || []).forEach((name) => {
+    const button = actionElements[name]?.();
+    if (button) $("#secondaryActions").append(button);
+  });
+  const unavailableLabels = {
+    roll: "주사위 굴리기", end_turn: "턴 종료", purchase_land: "토지 구매",
+    purchase_special: "특수지역 구매", build: "건설", manage: "관리", trade: "거래", revive: "부활"
+  };
+  $("#unavailableActions").innerHTML = Object.entries(unavailableLabels)
+    .filter(([name]) => !action(name).allowed)
+    .map(([name, label]) => `<button type="button" data-disabled-action="${name}" aria-describedby="disabledActionHelp">${label}<small>${escapeHtml(action(name).reason)}</small></button>`)
+    .join("");
+  $("#unavailableActions").querySelectorAll("[data-disabled-action]").forEach((button) => {
+    button.addEventListener("click", () => { $("#disabledActionHelp").textContent = action(button.dataset.disabledAction).reason; });
+  });
 }
 
 async function refreshPlayer() {
@@ -1040,7 +1395,7 @@ async function refreshPlayer() {
       activeBuildPreview = null;
       rankingModal.hidden = true;
       financeModal.hidden = true;
-    } else if (animationState.playing) {
+    } else if (animationState.playing || turnPresentationState.inputLocked) {
       pendingSnapshot = { public: state, private: privateData, state_version: state.state_version };
       return;
     }
@@ -1081,6 +1436,12 @@ async function refreshPlayer() {
     pendingSnapshot = null;
     enqueuePendingEvents(privateData);
     enqueuePendingEconomicActions(privateData, state.public_economic_actions || []);
+    if (connectionHadError) {
+      showMessage("재접속에 성공했습니다.");
+      connectionHadError = false;
+    }
+    maybeShowContextHint(privateData);
+    showFirstHelpIfNeeded();
     if (authenticatedMe) {
       if (lastArrivalPosition === null) {
         lastArrivalPosition = authenticatedMe.position;
@@ -1092,11 +1453,12 @@ async function refreshPlayer() {
     }
   } catch (error) {
     if (error.name !== "AbortError") {
+      connectionHadError = true;
       if (animationState.playing) animationController.cancel();
       actionInFlight = false;
       hideAnimationOverlay();
       renderActionState();
-      showMessage(error.message || "서버 연결이 끊겼습니다. 다시 연결하는 중입니다.", true);
+      showMessage(error.message || "서버에 연결할 수 없습니다. 자동으로 다시 연결하는 중입니다.", true);
     }
   } finally {
     refreshInFlight = false;
@@ -1225,17 +1587,34 @@ function confirmedRequest(button, url, body, config) {
 async function performAction(button, url, body) {
   if (actionInFlight || animationState.playing) return;
   actionInFlight = true;
+  const temporaryActionId = `request-${Date.now()}`;
+  presentationMetric(temporaryActionId);
+  setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: temporaryActionId, locked: true, reason: "서버 응답을 기다리는 중입니다." });
   renderActionState();
   showMessage("처리 중…");
   try {
     const result = await postJson(url, body);
+    const actionId = result.economic_action?.action_id || temporaryActionId;
+    turnPresentationState.actionId = actionId;
     if (result.economic_action) await enqueueEconomicAction(result.economic_action);
-    showMessage("처리되었습니다.");
+    renderedStateVersion = -1;
+    await syncPresentationSnapshot(actionId);
+    await showResultSummary(actionId, {
+      title: result.user_message || "행동을 완료했습니다.",
+      detail: `현재 현금 ${money(lastPrivate?.player?.cash_won)}원`,
+      next: lastPrivate?.next_action_message || "현재 가능한 행동을 확인하세요.",
+      holdMs: 600,
+      required: ["bankruptcy_declared", "special_forced_sale", "loan_created"].includes(result.economic_action?.action_type)
+    });
+    await completeServerPresentation(actionId);
+    showMessage(result.user_message || result.result_summary || "행동을 완료했습니다.");
   } catch (error) {
     showMessage(error.message || "요청을 처리하지 못했습니다.", true);
   } finally {
     actionInFlight = false;
-    await refreshPlayer();
+    await syncPresentationSnapshot(turnPresentationState.actionId || temporaryActionId);
+    finishPresentation(turnPresentationState.actionId || temporaryActionId);
+    renderActionState();
   }
 }
 
@@ -1276,7 +1655,25 @@ function renderBuildConfirmation(preview) {
 async function openBuildConfirmation() {
   if (actionInFlight || animationState.playing || !action("build").allowed) return;
   const selectedType = buildingType.value;
+  if (!selectedType) {
+    $("#disabledActionHelp").textContent = "먼저 건물 유형을 선택하세요.";
+    buildingType.focus();
+    return;
+  }
   buildConfirmationOrigin = build;
+  try {
+    if (["BUILD_DECISION", "MANAGEMENT_DECISION"].includes(lastPrivate?.turn_step?.step_id)) {
+      await postJson("/api/turn-step/build-phase", { player_id: playerId, step_id: "BUILD_TYPE_SELECTION" });
+      await syncPresentationSnapshot(lastPrivate?.current_arrival?.action_id || "build-selection");
+    }
+    if (lastPrivate?.turn_step?.step_id === "BUILD_TYPE_SELECTION") {
+      await postJson("/api/turn-step/build-phase", { player_id: playerId, step_id: "BUILD_CONFIRMATION" });
+      await syncPresentationSnapshot(lastPrivate?.current_arrival?.action_id || "build-confirmation");
+    }
+  } catch (error) {
+    showMessage(error.message || "건설 단계 시간을 확인하지 못했습니다.", true);
+    return;
+  }
   buildConfirmModal.hidden = false;
   $("#buildConfirmDetails").innerHTML = "<p>최신 건설 조건을 확인하는 중…</p>";
   $("#buildConfirmError").textContent = "";
@@ -1302,6 +1699,9 @@ async function confirmBuildAction() {
   const preview = activeBuildPreview;
   if (!preview || actionInFlight) return;
   actionInFlight = true;
+  const presentationId = `build-${Date.now()}`;
+  let completedActionId = presentationId;
+  setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: presentationId, locked: true, reason: "건설 결과를 확인하는 중입니다." });
   $("#confirmBuild").disabled = true;
   $("#cancelBuildConfirm").disabled = true;
   $("#confirmBuild").textContent = "건설 처리 중…";
@@ -1315,9 +1715,18 @@ async function confirmBuildAction() {
       building_type: preview.building_type,
       preview_price_won: preview.price_won
     });
+    completedActionId = result.economic_action?.action_id || presentationId;
     buildConfirmModal.hidden = true;
     activeBuildPreview = null;
     if (result.economic_action) await enqueueEconomicAction(result.economic_action);
+    renderedStateVersion = -1;
+    await syncPresentationSnapshot(completedActionId);
+    await showResultSummary(result.economic_action?.action_id || presentationId, {
+      title: `${preview.region_name}에 ${preview.building_type_name} 건물을 건설했습니다.`,
+      detail: `건설비 ${money(preview.price_won)}원 · 현재 현금 ${money(lastPrivate?.player?.cash_won)}원`,
+      next: lastPrivate?.next_action_message || "현재 가능한 행동을 확인하세요."
+    });
+    await completeServerPresentation(completedActionId);
     showMessage(`${preview.region_name} ${preview.building_type_name} 건설이 완료되었습니다.`);
   } catch (error) {
     $("#buildConfirmError").textContent = error.message || "건설 요청에 실패했습니다.";
@@ -1327,35 +1736,59 @@ async function confirmBuildAction() {
     actionInFlight = false;
     $("#cancelBuildConfirm").disabled = false;
     renderActionState();
-    await refreshPlayer();
+    await syncPresentationSnapshot(completedActionId);
     if (buildConfirmModal.hidden) {
       buildConfirmationOrigin?.focus();
       buildConfirmationOrigin = null;
     }
+    finishPresentation(completedActionId);
+    renderActionState();
   }
 }
 
 async function performRoll(button) {
   if (actionInFlight || animationState.playing) return;
+  const clickedAt = performance.now();
   actionInFlight = true;
+  setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: null, locked: true, reason: "서버에서 주사위 결과를 확인하는 중입니다." });
   renderActionState();
   showAnimationStage(diceStage);
   diceFace.classList.add("is-rolling");
   diceResultText.textContent = "서버에서 주사위 결과를 확인하는 중…";
   showMessage("주사위를 굴리는 중…");
   try {
+    const requestStarted = performance.now();
     const result = await postJson("/api/roll", { player_id: playerId });
+    const metric = presentationMetric(result.action_id);
+    metric.clicked_at = clickedAt;
+    metric.request_started_after_ms = Math.round(requestStarted - clickedAt);
+    metric.server_response_ms = Math.round(performance.now() - requestStarted);
+    turnPresentationState.actionId = result.action_id;
     observedRollActionId = result.action_id;
     await animationController.enqueue("dice", result.action_id, () => playDiceSequence(result));
-    if (result.economic_action) await enqueueEconomicAction(result.economic_action);
+    const pendingEvent = (lastPrivate?.pending_event_occurrences || [])[0];
+    if (pendingEvent) {
+      queuedOccurrenceIds.add(pendingEvent.occurrence_id);
+      await runPresentationScene(presentationPhases.EVENT_REVEAL, result.action_id, 0, "이벤트를 확인하세요.", () => revealEventOccurrence(pendingEvent));
+      queuedOccurrenceIds.delete(pendingEvent.occurrence_id);
+    }
+    if (result.economic_action) {
+      const economicStarted = performance.now();
+      await enqueueEconomicAction(result.economic_action);
+      metric.economic_animation_ms = Math.round(performance.now() - economicStarted);
+    }
+    await syncPresentationSnapshot(result.action_id);
+    await showResultSummary(result.action_id, rollResultSummary(result));
+    await completeServerPresentation(result.action_id);
     showMessage(`주사위 결과 ${result.dice}`);
   } catch (error) {
     hideAnimationOverlay();
     showMessage(error.message || "주사위를 굴리지 못했습니다.", true);
   } finally {
     actionInFlight = false;
-    renderedStateVersion = -1;
-    await refreshPlayer();
+    await syncPresentationSnapshot(turnPresentationState.actionId);
+    if (turnPresentationState.actionId) finishPresentation(turnPresentationState.actionId);
+    renderActionState();
   }
 }
 
@@ -1424,8 +1857,7 @@ joinForm.addEventListener("submit", async (event) => {
     window.localStorage.setItem("tour_reconnect_token", reconnectToken);
     window.localStorage.setItem("tour_game_instance_id", storedGameInstanceId);
     window.currentGameInstanceId = storedGameInstanceId;
-    renderedStateVersion = -1;
-    await refreshPlayer();
+    await syncPresentationSnapshot(completedActionId);
   } catch (error) {
     showMessage(error.message, true);
   }
@@ -1458,7 +1890,13 @@ $("#actionConfirmModal").addEventListener("click", (event) => {
   if (event.target === $("#actionConfirmModal")) closeActionConfirmation();
 });
 manageAction.addEventListener("click", () => renderManagement(lastState, lastPrivate, "manage"));
-tradeAction.addEventListener("click", () => renderManagement(lastState, lastPrivate, "trade"));
+tradeAction.addEventListener("click", async () => {
+  try {
+    await postJson("/api/turn-step/management-phase", { player_id: playerId, step_id: "TRADE_CONFIGURATION" });
+    await syncPresentationSnapshot(lastPrivate?.current_arrival?.action_id || "trade-configuration");
+    renderManagement(lastState, lastPrivate, "trade");
+  } catch (error) { showMessage(error.message, true); }
+});
 
 document.querySelectorAll("[data-info-tab]").forEach((button) => button.addEventListener("click", () => {
   activeInfoTab = button.dataset.infoTab;
@@ -1472,12 +1910,24 @@ $("#openFinance").addEventListener("click", (event) => {
 });
 $("#closeFinance").addEventListener("click", () => { closePanelDialog(financeModal); flushPendingArrivalFocus(); });
 document.querySelectorAll("[data-finance-tab]").forEach((button) => button.addEventListener("click", () => {
+  financeScrollPositions[activeFinanceTab] = $("#financeScroll")?.scrollTop || 0;
   activeFinanceTab = button.dataset.financeTab;
   applyFinanceTab();
 }));
-[rankingModal, financeModal].forEach((modal) => modal.addEventListener("click", (event) => {
-  if (event.target === modal) { closePanelDialog(modal); flushPendingArrivalFocus(); }
+[rankingModal, financeModal, helpModal].forEach((modal) => modal.addEventListener("click", (event) => {
+  if (event.target === modal) {
+    if (modal === helpModal) markHelpSeen();
+    closePanelDialog(modal);
+    flushPendingArrivalFocus();
+  }
 }));
+$("#closeHelp").addEventListener("click", () => { markHelpSeen(); closePanelDialog(helpModal); });
+$("#replayHelp").addEventListener("click", (event) => openPanelDialog(helpModal, event.currentTarget));
+const contextHelpEnabled = $("#contextHelpEnabled");
+contextHelpEnabled.checked = contextualHelpEnabled();
+contextHelpEnabled.addEventListener("change", () => {
+  window.localStorage.setItem("tour_context_help_enabled", String(contextHelpEnabled.checked));
+});
 
 animationPreference.value = window.localStorage.getItem("tour_animation_preference") || "full";
 animationPreference.addEventListener("change", () => {
@@ -1489,6 +1939,7 @@ $("#skipEventReveal").addEventListener("click", () => {
   eventReveal.classList.add("is-revealed");
 });
 $("#skipEconomicAnimation").addEventListener("click", () => animationController.skip());
+$("#continuePresentation").addEventListener("click", () => animationController.skip());
 
 document.addEventListener("keydown", (event) => {
   if (!buildConfirmModal.hidden) {
@@ -1503,6 +1954,9 @@ document.addEventListener("keydown", (event) => {
   } else if (!rankingModal.hidden) {
     trapConfirmationFocus(event, rankingModal);
     if (event.key === "Escape") { closePanelDialog(rankingModal); flushPendingArrivalFocus(); }
+  } else if (!helpModal.hidden) {
+    trapConfirmationFocus(event, helpModal);
+    if (event.key === "Escape") { markHelpSeen(); closePanelDialog(helpModal); }
   }
 });
 window.addEventListener("popstate", () => {
@@ -1510,6 +1964,7 @@ window.addEventListener("popstate", () => {
   if (!$("#actionConfirmModal").hidden) closeActionConfirmation();
   if (!financeModal.hidden) closePanelDialog(financeModal);
   if (!rankingModal.hidden) closePanelDialog(rankingModal);
+  if (!helpModal.hidden) { markHelpSeen(); closePanelDialog(helpModal); }
   flushPendingArrivalFocus();
 });
 

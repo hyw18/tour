@@ -38,14 +38,34 @@ def test_rankings_use_server_public_wealth_without_private_cash():
 
 def test_finance_details_are_reachable_in_one_accessible_dialog():
     template, script, _ = sources()
-    assert template.count('id="assetPanel"') == 1
-    assert template.count('id="settlementPanel"') == 1
     assert 'id="financeModal"' in template
-    for tab in ("assets", "tax", "loan", "history"):
+    for tab, panel in (("assets", "financeAssetsPanel"), ("tax", "financeTaxPanel"), ("loan", "financeLoanPanel"), ("history", "financeHistoryPanel")):
         assert f'data-finance-tab="{tab}"' in template
-        assert f'data-finance-pane="{tab}"' in script or tab == "tax"
+        assert f'id="{panel}"' in template
+        assert f'aria-controls="{panel}"' in template
+    assert template.count('role="tabpanel"') == 4
+    assert 'setAttribute("aria-selected"' in script
     assert "trapConfirmationFocus(event, financeModal)" in script
     assert "closePanelDialog(financeModal)" in script
+
+
+def test_primary_actions_arrival_handlers_and_mobile_reasons_share_contract():
+    template, script, css = sources()
+    assert 'id="primaryActions"' in template
+    assert 'id="disabledActionHelp"' in template
+    assert 'data-arrival-action=' in script
+    assert "invokeAction(button.dataset.arrivalAction" in script
+    assert "current_arrival_expenses" in script
+    assert ".unavailable-actions" in css
+    assert "min-height: 44px" in css
+
+
+def test_first_turn_help_and_build_placeholder_are_present():
+    template, script, _ = sources()
+    assert 'id="helpModal"' in template
+    assert 'value="" selected>건물 유형 선택' in template
+    assert "tour_help_intro_seen" in script
+    assert "tour_context_help_enabled" in script
 
 
 def test_arrival_and_selection_have_distinct_semantics_and_auto_focus():

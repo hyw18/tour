@@ -157,9 +157,11 @@ def test_turn_server_dice_forced_start_stop_and_round_increment():
     assert engine.state.pending_action["type"] == "purchase_land"
     with pytest.raises(GameRuleError, match="already"):
         engine.roll_dice(a["id"])
+    engine.decline_pending_action(a["id"])
     engine.end_turn(a["id"])
     engine.set_forced_dice(3)
     engine.roll_dice(b["id"])
+    engine.decline_pending_action(b["id"])
     state = engine.end_turn(b["id"])
     assert state["global_round"] == 2
 
@@ -203,6 +205,7 @@ def test_land_purchase_decline_and_cash_rules_are_server_side():
     player = next(player for player in state["players"] if player["id"] == human["id"])
     assert player["cash_won"] == 9_300_000
     assert state["land_ownership"]["gimcheon"] == human["id"]
+    engine.decline_pending_action(human["id"])
     engine.end_turn(human["id"])
 
 
@@ -1254,25 +1257,32 @@ def test_integrated_bot_games_and_pause_preset_paths():
     assert state["paused"] is True or state["ended"] is True
 
 
-def test_timeout_auto_ends_turn_and_pause_stops_timer(monkeypatch):
+def test_step_timeout_auto_rolls_then_end_step_finishes_and_pause_stops_timer(monkeypatch):
     engine = GameEngine(DATA_DIR)
     configure(engine, slot_types=["human", "human"], turn_limit_seconds=15)
     a = engine.join("Alice")
     b = engine.join("Bob")
     engine.start_game()
-    engine.state.turn_started_at -= 16
+    engine.state.turn_step["deadline_at"] -= 16
+    engine.advance_automation()
+    assert engine.current_player().id == a["id"]
+    assert engine.state.turn_has_rolled is True
+    engine.complete_turn_presentation(a["id"])
+    if engine.state.pending_action:
+        engine.decline_pending_action(a["id"])
+        engine.complete_turn_presentation(a["id"])
+    engine.state.turn_step["deadline_at"] -= 20
     engine.advance_automation()
     assert engine.current_player().id == b["id"]
     engine.pause()
     paused_player = engine.current_player().id
-    engine.state.turn_elapsed_before_pause = 99
+    engine.state.turn_step["deadline_at"] -= 99
     engine.advance_automation()
     assert engine.current_player().id == paused_player
-    engine.state.turn_elapsed_before_pause = 0
     engine.resume()
-    engine.state.turn_started_at -= 16
+    engine.state.turn_step["deadline_at"] -= 20
     engine.advance_automation()
-    assert engine.current_player().id == a["id"]
+    assert engine.state.turn_has_rolled is True
 
 
 def test_final_round_reaches_temporary_end():

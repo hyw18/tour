@@ -1,29 +1,43 @@
 # 규칙 구현·테스트 대응표
 
-분석 기준 HEAD: `bd3d295fc1eb7eecb668492f6aa5f2e8c34619e2`
+분석 기준 HEAD: `5cf5b6a8edd0ac27f40efb262cec87cea381107c`
 기준 `rules_version`: `2026.07.16.1`
-판정 시점: 2026-07-16. 최신 작업 트리의 194개 통과 테스트를 다시 대조한 결과다.
+판정 시점: 2026-07-17. 최신 작업 트리의 224개 통과 테스트를 다시 대조한 결과다.
 
 검증 상태는 `CODE_PRESENT`, `UNIT_TESTED`, `MULTI_CLIENT_TESTED`,
 `BROWSER_TESTED`, `REAL_DEVICE_TEST_REQUIRED`, `CONFLICT`, `UNRESOLVED`로 해석한다.
-이번 환경에서는 실제 Chromium이 시작되지 않아 어떤 규칙에도 `BROWSER_TESTED`를 새로 부여하지 않았다.
+Chromium은 시스템 설치가 아닌 임시 공유 라이브러리 경로로 실행했다. 플레이어 핵심 흐름에는
+`BROWSER_TESTED`를 부여하지만 물리 기기 검증은 별도로 `REAL_DEVICE_TEST_REQUIRED`다.
+
+## 플레이어 사용성 연결 상태
+
+| 항목 | 상태 | 근거 |
+|---|---|---|
+| 서버 제공 다음 행동과 주/보조 우선순위 | BROWSER_TESTED | `_next_action_message`, `_action_priority`, Playwright |
+| 현재 도착의 비용 식별 | UNIT_TESTED | `arrival_id`, `action_id`, `turn_sequence`, `state_version` |
+| 건설 유형 placeholder·가능 유형 제한 | BROWSER_TESTED | `allowed_actions.build`만 사용 |
+| 독립 자산·세금·대출·내역 탭 | BROWSER_TESTED | 네 개 ARIA tabpanel |
+| 실제 모바일 터치·회전 | REAL_DEVICE_TEST_REQUIRED | 물리 기기 미연결 |
 
 | MATCH | PARTIAL | MISSING | CONFLICT | UNRESOLVED | 합계 |
 |---:|---:|---:|---:|---:|---:|
-| 103 | 0 | 0 | 0 | 3 | 106 |
+| 107 | 0 | 0 | 0 | 3 | 110 |
 
 | 규칙 ID | 판정 | 검증 상태 | 코드 근거 | 테스트 근거 | 차이·비고 |
 |---|---|---|---|---|---|
 | GAME-001 | MATCH | UNIT_TESTED | app.py; game/routes.py; game/automation.py | tests/test_routes.py; tests/test_engine.py:test_lobby_join_rules_and_initial_economy | 공식 요구와 현재 근거가 일치 |
 | GAME-002 | MATCH | UNIT_TESTED | app.py; game/routes.py; game/automation.py | tests/test_routes.py; tests/test_engine.py:test_lobby_join_rules_and_initial_economy | 공식 요구와 현재 근거가 일치 |
 | GAME-003 | MATCH | UNIT_TESTED | app.py; game/routes.py; game/automation.py | tests/test_routes.py; tests/test_engine.py:test_lobby_join_rules_and_initial_economy | 공식 요구와 현재 근거가 일치 |
-| CONFIG-001 | MATCH | UNIT_TESTED | game/models.py:HostConfig; game/engine.py:configure | tests/test_routes.py:test_host_only_start_pause_resume_and_config | 공식 요구와 현재 근거가 일치 |
-| CONFIG-002 | MATCH | UNIT_TESTED | game/models.py:HostConfig; game/engine.py:configure | tests/test_routes.py:test_host_only_start_pause_resume_and_config | 공식 요구와 현재 근거가 일치 |
-| CONFIG-003 | MATCH | UNIT_TESTED | game/models.py:HostConfig; game/engine.py:configure | tests/test_routes.py:test_host_only_start_pause_resume_and_config | 공식 요구와 현재 근거가 일치 |
-| TURN-001 | MATCH | UNIT_TESTED | game/engine.py:start_game,end_turn,_advance_round | tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
-| TURN-002 | MATCH | UNIT_TESTED | game/engine.py:start_game,end_turn,_advance_round | tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
-| TURN-003 | MATCH | UNIT_TESTED | game/engine.py:start_game,end_turn,_advance_round | tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
-| TURN-004 | MATCH | UNIT_TESTED | game/engine.py:start_game,end_turn,_advance_round | tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
+| CONFIG-001 | MATCH | UNIT_TESTED | game/models.py:HostConfig; game/engine.py:configure | tests/test_turn_step_timers.py:test_presets_and_official_response_timers_remain_independent; tests/test_routes.py | 공식 요구와 현재 근거가 일치 |
+| CONFIG-002 | MATCH | UNIT_TESTED | game/models.py:HostConfig; game/engine.py:configure | tests/test_turn_step_timers.py:test_presets_and_official_response_timers_remain_independent; tests/test_routes.py | 공식 요구와 현재 근거가 일치 |
+| CONFIG-003 | MATCH | UNIT_TESTED | game/models.py:HostConfig; game/engine.py:configure | tests/test_turn_step_timers.py:test_presets_and_official_response_timers_remain_independent; tests/test_routes.py | 공식 요구와 현재 근거가 일치 |
+| CONFIG-004 | MATCH | UNIT_TESTED | game/models.py:HostConfig; game/engine.py:configure | tests/test_turn_step_timers.py:test_presets_and_official_response_timers_remain_independent; tests/test_routes.py | 공식 요구와 현재 근거가 일치 |
+| TURN-001 | MATCH | UNIT_TESTED | game/engine.py:start_game,end_turn,_advance_round | tests/test_turn_step_timers.py; tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
+| TURN-002 | MATCH | UNIT_TESTED | game/engine.py:start_game,end_turn,_advance_round | tests/test_turn_step_timers.py; tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
+| TURN-003 | MATCH | UNIT_TESTED | game/engine.py:start_game,end_turn,_advance_round | tests/test_turn_step_timers.py; tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
+| TURN-004 | MATCH | UNIT_TESTED | game/engine.py:start_game,end_turn,_advance_round | tests/test_turn_step_timers.py; tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
+| TURN-005 | MATCH | UNIT_TESTED | game/engine.py:start_game,end_turn,_advance_round | tests/test_turn_step_timers.py; tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
+| TURN-006 | MATCH | UNIT_TESTED | game/engine.py:start_game,end_turn,_advance_round | tests/test_turn_step_timers.py; tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
 | PAUSE-001 | MATCH | UNIT_TESTED | game/engine.py:pause,resume; game/models.py:pause_started_at | tests/test_rule_gap_fixes.py:test_pause_preserves_about_seven_seconds_after_three_seconds_and_long_pause | 공식 요구와 현재 근거가 일치 |
 | BOARD-001 | MATCH | UNIT_TESTED | game/data_loader.py:_validate_board,_validate_cross_file_rules; data/board.json | tests/test_engine.py:test_data_loader_accepts_required_json_files | 공식 요구와 현재 근거가 일치 |
 | DICE-001 | MATCH | UNIT_TESTED | game/engine.py:roll_dice | tests/test_engine.py:test_turn_server_dice_forced_start_stop_and_round_increment | 공식 요구와 현재 근거가 일치 |
@@ -93,6 +107,7 @@
 | EVENT-008 | MATCH | UNIT_TESTED | game/data_loader.py:_validate_events,_validate_event_references; game/services/events.py | tests/test_rule_gap_fixes.py:test_event_semantic_reference_and_cycle_validation,test_three_event_composition_rounds_once_and_override_disappears | 공식 요구와 현재 근거가 일치 |
 | EVENT-009 | MATCH | UNIT_TESTED | game/data_loader.py:_validate_events,_validate_event_references; game/services/events.py | tests/test_rule_gap_fixes.py:test_event_semantic_reference_and_cycle_validation,test_three_event_composition_rounds_once_and_override_disappears | 공식 요구와 현재 근거가 일치 |
 | EVENT-010 | UNRESOLVED | UNRESOLVED | game/data_loader.py:_validate_events,_validate_event_references; game/services/events.py | — | user approval required for the current 20 event cards |
+| EVENT-011 | MATCH | UNIT_TESTED | game/data_loader.py:_validate_events,_validate_event_references; game/services/events.py | tests/test_rule_gap_fixes.py:test_event_semantic_reference_and_cycle_validation,test_three_event_composition_rounds_once_and_override_disappears | 공식 요구와 현재 근거가 일치 |
 | BANKRUPTCY-001 | MATCH | UNIT_TESTED | game/engine.py:_bankrupt_player,respond_land_takeover; game/services/bankruptcy.py | tests/test_engine.py:test_bankruptcy_a_takeover_success_requires_land_price_payment; tests/test_player_connections.py | 공식 요구와 현재 근거가 일치 |
 | BANKRUPTCY-002 | MATCH | UNIT_TESTED | game/engine.py:_bankrupt_player,respond_land_takeover; game/services/bankruptcy.py | tests/test_engine.py:test_bankruptcy_a_takeover_success_requires_land_price_payment; tests/test_player_connections.py | 공식 요구와 현재 근거가 일치 |
 | BANKRUPTCY-003 | MATCH | UNIT_TESTED | game/engine.py:_bankrupt_player,respond_land_takeover; game/services/bankruptcy.py | tests/test_engine.py:test_bankruptcy_a_takeover_success_requires_land_price_payment; tests/test_player_connections.py | 공식 요구와 현재 근거가 일치 |

@@ -16,6 +16,7 @@ from .models import (
     BOARD_SIZE,
     BUILDING_TYPES,
     BOT_STRATEGIES,
+    STEP_TIME_PRESETS,
     GameState,
     HostConfig,
     MAX_EMERGENCY_LOAN_PRINCIPAL_WON,
@@ -45,6 +46,32 @@ class IdempotencyConflict(GameRuleError):
 
 class GameEngine:
     MAX_PROCESSED_KEYS = 1_000
+    STEP_LABELS = {
+        "TURN_START": "턴 시작", "ROLL_DECISION": "주사위 선택", "ROLL_RESOLUTION": "주사위 결과 처리",
+        "ARRIVAL_PRESENTATION": "도착 결과 처리", "LAND_PURCHASE_DECISION": "토지 구매 결정",
+        "SPECIAL_PURCHASE_DECISION": "특수지역 구매 결정", "BUILD_DECISION": "건물 건설 결정",
+        "BUILD_TYPE_SELECTION": "건물 유형 선택", "BUILD_CONFIRMATION": "건물 건설 확인",
+        "MANAGEMENT_DECISION": "관리 행동 선택", "TRADE_CONFIGURATION": "거래 조건 작성",
+        "TRADE_RESPONSE": "거래 응답", "USAGE_CHANGE_RESPONSE": "용도 변경 응답",
+        "EVENT_CONFIRMATION": "이벤트 확인", "SETTLEMENT_PRESENTATION": "출발지 정산 처리",
+        "RESULT_CONFIRMATION": "결과 확인", "TURN_END_DECISION": "턴 종료", "TURN_COMPLETE": "턴 완료",
+        "BANKRUPTCY_TAKEOVER": "파산 토지 인수", "REVIVAL_DECISION": "부활 선택",
+    }
+    STEP_TIMEOUT_ACTIONS = {
+        "ROLL_DECISION": "auto_roll", "LAND_PURCHASE_DECISION": "decline_land_purchase",
+        "SPECIAL_PURCHASE_DECISION": "decline_special_purchase", "BUILD_DECISION": "decline_build",
+        "BUILD_TYPE_SELECTION": "decline_build", "BUILD_CONFIRMATION": "cancel_build",
+        "MANAGEMENT_DECISION": "skip_management", "TRADE_CONFIGURATION": "cancel_trade",
+        "EVENT_CONFIRMATION": "acknowledge_event", "TURN_END_DECISION": "end_turn",
+        "BANKRUPTCY_TAKEOVER": "decline_takeover", "REVIVAL_DECISION": "skip_revival",
+    }
+    USER_INPUT_STEPS = frozenset(STEP_TIMEOUT_ACTIONS)
+    DEFAULT_STEP_LIMITS = {
+        "ROLL_DECISION": 15, "LAND_PURCHASE_DECISION": 15, "SPECIAL_PURCHASE_DECISION": 15,
+        "BUILD_DECISION": 20, "BUILD_TYPE_SELECTION": 20, "BUILD_CONFIRMATION": 20,
+        "MANAGEMENT_DECISION": 25, "TRADE_CONFIGURATION": 30, "EVENT_CONFIRMATION": 15,
+        "TURN_END_DECISION": 10, "BANKRUPTCY_TAKEOVER": 15, "REVIVAL_DECISION": 15,
+    }
     COMMERCIAL_VISIT_FEE_RATES = {
         1: (270, 1000),
         2: (243, 1000),
@@ -310,6 +337,18 @@ class GameEngine:
         supplied = self._reconnect_token_hash(str(reconnect_token or ""))
         if not expected or not compare_digest(expected, supplied):
             raise PermissionError("invalid reconnect token")
+        step = self.state.turn_step or {}
+        grace = self.state.config.reconnect_grace_seconds
+        grace_key = (step.get("turn_id"), step.get("step_sequence"), player_id)
+        if grace and step.get("player_id") == player_id and step.get("user_input_required") and grace_key not in self.state.step_reconnect_graces:
+            step["started_at"] += grace
+            if step.get("deadline_at") is not None:
+                step["deadline_at"] += grace
+            self.state.step_reconnect_graces.add(grace_key)
+            self._log("turn_step", "reconnect_grace_applied", {
+                "turn_id": step.get("turn_id"), "step_id": step.get("step_id"),
+                "step_sequence": step.get("step_sequence"), "player_id": player_id, "grace_seconds": grace,
+            })
         self.state.economic_animation_cursors[player_id] = self.state.economic_sequence
         return player.public()
 
@@ -319,6 +358,8 @@ class GameEngine:
 
     def configure(self, payload):
         self._require_lobby()
+        requested_preset = str(payload.get("step_time_preset", self.state.config.step_time_preset))
+        preset_total = {"fast": 60, "default": 120, "leisurely": 180, "unlimited": None}.get(requested_preset, self.state.config.turn_total_limit_seconds)
         config = HostConfig(
             total_slots=int(payload.get("total_slots", self.state.config.total_slots)),
             slot_types=list(payload.get("slot_types", self.state.config.slot_types)),
@@ -327,12 +368,24 @@ class GameEngine:
             turn_limit_seconds=payload.get("turn_limit_seconds", self.state.config.turn_limit_seconds),
             bot_action_delay=payload.get("bot_action_delay", self.state.config.bot_action_delay),
             fast_simulation=bool(payload.get("fast_simulation", self.state.config.fast_simulation)),
+            step_time_preset=requested_preset,
+            step_time_limits=dict(payload.get("step_time_limits", self.state.config.step_time_limits) or {}),
+            turn_total_limit_seconds=payload.get("turn_total_limit_seconds", preset_total),
+            reconnect_grace_seconds=int(payload.get("reconnect_grace_seconds", self.state.config.reconnect_grace_seconds)),
         )
         if config.turn_limit_seconds in ("", "none", "unlimited"):
             config.turn_limit_seconds = None
         elif config.turn_limit_seconds is not None:
             config.turn_limit_seconds = int(config.turn_limit_seconds)
         config.bot_action_delay = float(config.bot_action_delay)
+        if config.turn_total_limit_seconds in ("", "none", "unlimited"):
+            config.turn_total_limit_seconds = None
+        elif config.turn_total_limit_seconds is not None:
+            config.turn_total_limit_seconds = int(config.turn_total_limit_seconds)
+        config.step_time_limits = {
+            str(key).upper(): None if value in (None, "", "unlimited") else int(value)
+            for key, value in config.step_time_limits.items()
+        }
         config.normalize()
         self._validate_config(config)
         self.state.config = config
@@ -423,6 +476,10 @@ class GameEngine:
                     timed_request["created_at"] += paused_duration
                 for player_id in timed_request.get("approver_started_at", {}):
                     timed_request["approver_started_at"][player_id] += paused_duration
+            if self.state.turn_step:
+                self.state.turn_step["started_at"] += paused_duration
+                if self.state.turn_step.get("deadline_at") is not None:
+                    self.state.turn_step["deadline_at"] += paused_duration
             self.state.paused = False
             self.state.pause_started_at = None
             self.state.turn_started_at = monotonic()
@@ -432,6 +489,7 @@ class GameEngine:
         player = self._require_current_player(player_id)
         if self.state.turn_has_rolled:
             raise GameRuleError("current player already rolled")
+        self._set_turn_step("ROLL_RESOLUTION", "dice_requested", player_id=player.id)
         dice = self._next_dice()
         self.state.last_dice = dice
         self.state.turn_has_rolled = True
@@ -450,17 +508,26 @@ class GameEngine:
             "passed_start": start_position != 0 and player.position == 0,
             "stopped_at_start": start_position != 0 and player.position == 0,
             "arrival_type": self.data["board"][player.position]["type"],
+            "turn_sequence": self.state.turn_sequence,
         }
+        roll_result["arrival_id"] = (
+            f"{self.state.game_instance_id}:{self.state.turn_sequence}:"
+            f"{player.id}:{player.position}:{roll_result['action_id']}"
+        )
         self.state.last_roll = deepcopy(roll_result)
         self._record_activity(player)
         self._log("turn", "dice_move", {"player_id": player.id, "dice": dice, "from": start_position, "to": player.position})
         if player.position == 0:
             self._settle_start(player)
         self._resolve_arrival(player)
+        presentation_step = "SETTLEMENT_PRESENTATION" if player.position == 0 else "ARRIVAL_PRESENTATION"
+        self._set_turn_step(presentation_step, "arrival_resolved", player_id=player.id)
         return roll_result
 
     def end_turn(self, player_id):
         player = self._require_current_player(player_id)
+        if self.state.pending_action and self.state.pending_action.get("player_id") == player_id:
+            raise GameRuleError("pending arrival decision must be completed before ending the turn")
         self._record_activity(player)
         self._finish_turn(player.id)
         return self.public_state()
@@ -495,6 +562,7 @@ class GameEngine:
         player.lands.append(region_id)
         self.state.land_purchased_this_visit = True
         self.state.pending_action = self._build_pending_action(player, region_id, source="land_purchase")
+        self._set_turn_step("RESULT_CONFIRMATION", "land_purchased", player_id=player.id, next_step="BUILD_DECISION")
         self._log("asset", "land_purchased", {"player_id": player.id, "region_id": region_id, "price_won": price})
         return self.public_state()
 
@@ -504,9 +572,11 @@ class GameEngine:
             pending_type = self.state.pending_action.get("type")
             source = self.state.pending_action.get("source")
             self.state.pending_action = None
+            next_step = "MANAGEMENT_DECISION" if pending_type == "build" and source == "owned_land_visit" else "TURN_END_DECISION"
+            self._set_turn_step("RESULT_CONFIRMATION", "pending_action_declined", player_id=player_id, next_step=next_step)
             self._log(
                 "turn",
-                "land_purchase_declined" if pending_type == "purchase_land" else "building_declined",
+                {"purchase_land": "land_purchase_declined", "purchase_special": "special_purchase_declined"}.get(pending_type, "building_declined"),
                 {"player_id": player_id, "source": source},
             )
         return self.public_state()
@@ -549,6 +619,7 @@ class GameEngine:
         player.buildings.append(building["id"])
         self.state.successful_build_edit_this_visit = True
         self.state.pending_action = None
+        self._set_turn_step("RESULT_CONFIRMATION", "building_completed", player_id=player.id, next_step="TURN_END_DECISION")
         self._log("asset", "building_built", {"player_id": player.id, "region_id": region_id, "building_type": building_type, "cost_won": price})
         return self.public_state()
 
@@ -867,13 +938,55 @@ class GameEngine:
         if not occurrence or event_version < occurrence_version or event_version > current or occurrence_id in acknowledged:
             raise GameRuleError("no new event to acknowledge")
         acknowledged.add(occurrence_id)
+        self._resume_event_timer(player_id, occurrence_id)
         self.state.event_ack_versions[player_id] = event_version
+        if self.current_player() and self.current_player().id == player_id:
+            self._set_turn_step("RESULT_CONFIRMATION", "event_acknowledged", player_id=player_id, next_step="TURN_END_DECISION")
         return {
             "player_id": player.id,
             "recorded": True,
             "event_version": event_version,
             "occurrence_id": occurrence_id,
         }
+
+    def start_event_presentation(self, player_id, occurrence_id, stage="animation"):
+        player = self._require_current_player(player_id)
+        visible = self._visible_event_occurrences(player)
+        acknowledged = self.state.event_acknowledged_occurrences.get(player_id, set())
+        if not any(item["occurrence_id"] == occurrence_id for item in visible) or occurrence_id in acknowledged:
+            raise GameRuleError("event occurrence is not awaiting presentation")
+        existing = self.state.event_timer_pause
+        if existing and existing.get("player_id") == player_id and existing.get("occurrence_id") == occurrence_id:
+            return deepcopy(existing)
+        if existing:
+            self._resume_event_timer(existing.get("player_id"), existing.get("occurrence_id"))
+        self.state.event_timer_pause = {
+            "player_id": player_id,
+            "occurrence_id": occurrence_id,
+            "stage": stage,
+            "started_at": monotonic(),
+        }
+        return {"player_id": player_id, "occurrence_id": occurrence_id, "stage": stage, "timer_excluded": True}
+
+    def finish_event_presentation_animation(self, player_id, occurrence_id):
+        self._require_current_player(player_id)
+        excluded = self._resume_event_timer(player_id, occurrence_id)
+        self._set_turn_step("EVENT_CONFIRMATION", "event_card_revealed", player_id=player_id)
+        return {"player_id": player_id, "occurrence_id": occurrence_id, "excluded_seconds": round(excluded, 3)}
+
+    def _resume_event_timer(self, player_id, occurrence_id):
+        pause = self.state.event_timer_pause
+        if not pause or pause.get("player_id") != player_id or pause.get("occurrence_id") != occurrence_id:
+            return 0
+        excluded = max(0, monotonic() - pause["started_at"])
+        if self.state.turn_started_at is not None:
+            self.state.turn_started_at += excluded
+        if self.state.turn_step and self.state.turn_step.get("user_input_required"):
+            self.state.turn_step["started_at"] += excluded
+            if self.state.turn_step.get("deadline_at") is not None:
+                self.state.turn_step["deadline_at"] += excluded
+        self.state.event_timer_pause = None
+        return excluded
 
     def acknowledge_economic_actions(self, player_id, sequence):
         player = self._find_player(player_id)
@@ -1164,6 +1277,7 @@ class GameEngine:
         self.state.special_ownership[special_id] = player.id
         self.state.special_values.setdefault(special_id, price)
         self.state.pending_action = None
+        self._set_turn_step("RESULT_CONFIRMATION", "special_purchased", player_id=player.id, next_step="TURN_END_DECISION")
         self._log("special", "special_purchased", {"player_id": player.id, "special_region_id": special_id, "price_won": price})
         return self.public_state()
 
@@ -1203,6 +1317,7 @@ class GameEngine:
         }
         self.state.turn_elapsed_before_pause = self.elapsed_turn_seconds()
         self.state.turn_started_at = None
+        self._set_turn_step("TRADE_RESPONSE", "land_trade_proposed", player_id=buyer.id)
         self._log("request", "land_trade_proposed", {"requester_id": requester.id, "buyer_id": buyer.id, "region_id": region_id, "price_won": self.state.land_trade_offer["price_won"]})
         if buyer.is_bot:
             return self.respond_land_trade(buyer.id, self.bot_controller.accepts_land_trade(buyer, self.state.land_trade_offer))
@@ -1224,13 +1339,16 @@ class GameEngine:
         self._log("request", "land_trade_accepted" if accept else "land_trade_rejected", deepcopy(offer))
         self.state.land_trade_offer = None
         self.state.turn_started_at = monotonic()
+        self._set_turn_step("RESULT_CONFIRMATION", "land_trade_resolved", player_id=requester.id, next_step="MANAGEMENT_DECISION")
         return self.public_state()
 
     def expire_land_trade(self):
         if self.state.land_trade_offer and monotonic() - self.state.land_trade_offer["created_at"] >= self.state.land_trade_offer.get("timeout_seconds", 10):
             self._log("request", "land_trade_expired", deepcopy(self.state.land_trade_offer))
+            requester_id = self.state.land_trade_offer.get("requester_id")
             self.state.land_trade_offer = None
             self.state.turn_started_at = monotonic()
+            self._set_turn_step("RESULT_CONFIRMATION", "land_trade_timed_out", player_id=requester_id, next_step="MANAGEMENT_DECISION")
         return self.public_state()
 
     def run_bot_land_trade(self, seller_id, buyer_id, region_id):
@@ -1287,6 +1405,7 @@ class GameEngine:
         }
         self.state.turn_elapsed_before_pause = self.elapsed_turn_seconds()
         self.state.turn_started_at = None
+        self._set_turn_step("TRADE_RESPONSE", "operating_right_proposed", player_id=target.id)
         self._log("request", "operating_right_proposed", {"requester_id": requester.id, "target_id": target.id, "building_id": building_id, "price_won": price_won})
         if target.is_bot:
             return self.respond_operating_right_transfer(target.id, self.bot_controller.accepts_operating_right(target, self.state.operating_right_offer))
@@ -1321,6 +1440,7 @@ class GameEngine:
         self._log("request", "operating_right_accepted" if accept else "operating_right_rejected", deepcopy(offer))
         self.state.operating_right_offer = None
         self.state.turn_started_at = monotonic()
+        self._set_turn_step("RESULT_CONFIRMATION", "operating_right_resolved", player_id=requester.id if requester else None, next_step="MANAGEMENT_DECISION")
         return self.public_state()
 
     def request_usage_change(self, requester_id, building_id, new_type):
@@ -1361,6 +1481,8 @@ class GameEngine:
             "timeout_seconds": 10,
             "blocked_key": key,
         }
+        if approvers:
+            self._set_turn_step("USAGE_CHANGE_RESPONSE", "usage_change_requested", player_id=approvers[0])
         self._log("request", "usage_change_requested", {"requester_id": requester.id, "building_id": building_id, "new_type": new_type, "cost_won": cost})
         for approver_id in approvers:
             approver = self._find_player(approver_id)
@@ -1384,6 +1506,7 @@ class GameEngine:
             self._log("request", "usage_change_rejected", {"approver_id": approver_id, "requester_id": request["requester_id"], "building_id": request["building_id"]})
             self.state.blocked_usage_change_requests.add(tuple(request["blocked_key"]))
             self.state.usage_change_request = None
+            self._set_turn_step("RESULT_CONFIRMATION", "usage_change_rejected", player_id=request["requester_id"], next_step="MANAGEMENT_DECISION")
             return self.public_state()
         if all(request["responses"].get(player_id, True) for player_id in request["approvers"]) and set(request["responses"]) >= set(request["approvers"]):
             self._execute_usage_change()
@@ -1471,11 +1594,10 @@ class GameEngine:
         self.expire_operating_right_offer()
         self.expire_usage_change()
         self.expire_land_takeover()
-        if self._turn_timed_out():
-            player = self.current_player()
-            if player:
-                self._record_no_action(player, "turn_timeout")
-                self._finish_turn(player.id)
+        if self._turn_total_timed_out():
+            self._handle_turn_total_timeout()
+        elif self._step_timed_out():
+            self._handle_step_timeout()
         while True:
             player = self.current_player()
             if not player or not player.is_bot:
@@ -1506,7 +1628,11 @@ class GameEngine:
             return self.state.turn_elapsed_before_pause
         if self.state.paused:
             return self.state.turn_elapsed_before_pause
-        return self.state.turn_elapsed_before_pause + (monotonic() - self.state.turn_started_at)
+        effective_now = monotonic()
+        event_pause = self.state.event_timer_pause
+        if event_pause and event_pause.get("player_id") == getattr(self.current_player(), "id", None):
+            effective_now = min(effective_now, event_pause["started_at"])
+        return self.state.turn_elapsed_before_pause + (effective_now - self.state.turn_started_at)
 
     def with_idempotency(self, key, operation, signature=None):
         return self.repository.idempotent(key, operation, GameRuleError, signature, IdempotencyConflict)
@@ -1540,6 +1666,9 @@ class GameEngine:
             "last_roll": deepcopy(self.state.last_roll),
             "last_activity_player_id": self.state.last_activity_player_id,
             "elapsed_turn_seconds": round(self.elapsed_turn_seconds(), 3),
+            "turn_step": self._public_turn_step(),
+            "turn_total_remaining_seconds": self.turn_total_remaining_seconds(),
+            "turn_step_history": [deepcopy(item) for item in self.state.turn_step_history if item.get("turn_id") == (self.state.turn_step or {}).get("turn_id")],
             "pending_action": self.state.pending_action,
             "land_ownership": dict(self.state.land_ownership),
             "buildings": list(self.state.buildings),
@@ -1571,6 +1700,17 @@ class GameEngine:
                 "turn_limit_seconds": config.turn_limit_seconds,
                 "bot_action_delay": config.bot_action_delay,
                 "fast_simulation": config.fast_simulation,
+                "step_time_preset": config.step_time_preset,
+                "step_time_limits": self._effective_step_limits(),
+                "turn_total_limit_seconds": config.turn_total_limit_seconds,
+                "reconnect_grace_seconds": config.reconnect_grace_seconds,
+                "bot_pacing": {
+                    "turn_start_ms": 400,
+                    "decision_ms": 600,
+                    "result_hold_ms": 500,
+                    "between_turns_ms": 600,
+                    "applies_to_server": False,
+                },
             },
             "players": [player.public() for player in sorted(self.state.players, key=lambda p: p.slot_index)],
         }
@@ -1856,6 +1996,8 @@ class GameEngine:
             for action in self.state.economic_actions
             if player.id == action.get("actor_player_id") or player.id in action.get("related_player_ids", [])
         ]
+        allowed_actions = self._allowed_actions(player)
+        current_arrival = self._current_arrival(player)
         return {
             "game_instance_id": self.state.game_instance_id,
             "state_version": self.state.state_version,
@@ -1871,11 +2013,24 @@ class GameEngine:
             "assets": self._player_assets(player),
             "pending_commercial_sale_refunds": refunds,
             "last_settlement": deepcopy(last_settlement),
-            "allowed_actions": self._allowed_actions(player),
+            "allowed_actions": allowed_actions,
+            "next_action_message": self._next_action_message(player, allowed_actions),
+            "action_priority": self._action_priority(player, allowed_actions),
+            "current_arrival": current_arrival,
+            "current_arrival_expenses": [
+                deepcopy(entry)
+                for entry in ledger.get("expense_entries", [])
+                if current_arrival
+                and entry.get("arrival_id") == current_arrival["arrival_id"]
+                and entry.get("turn_sequence") == current_arrival["turn_sequence"]
+            ],
             "related_requests": self._related_requests(player),
             "bankruptcy": self._player_bankruptcy_state(player),
             "pending_land_takeover": takeover,
             "turn_remaining_seconds": self._turn_remaining_seconds(),
+            "turn_step": self._public_turn_step(),
+            "turn_total_remaining_seconds": self.turn_total_remaining_seconds(),
+            "last_step_timeout": deepcopy(self.state.last_step_timeout) if self.state.last_step_timeout and self.state.last_step_timeout.get("player_id") == player.id else None,
             "recent_income": deepcopy(ledger.get("income_entries", [])[-10:]),
             "recent_expenses": deepcopy(ledger.get("expense_entries", [])[-10:]),
             "active_events": [
@@ -1900,10 +2055,74 @@ class GameEngine:
         }
 
     def _turn_remaining_seconds(self):
-        limit = self.state.config.turn_limit_seconds
-        if limit is None:
+        step = self._public_turn_step()
+        return step.get("remaining_seconds") if step else None
+
+    def _current_arrival(self, player):
+        roll = self.state.last_roll or {}
+        if (
+            roll.get("player_id") != player.id
+            or roll.get("turn_sequence") != self.state.turn_sequence
+            or roll.get("to_position") != player.position
+        ):
             return None
-        return max(0, round(limit - self.elapsed_turn_seconds(), 1))
+        return {
+            "arrival_id": roll.get("arrival_id"),
+            "action_id": roll.get("action_id"),
+            "turn_sequence": roll.get("turn_sequence"),
+            "state_version": self.state.state_version,
+            "position": player.position,
+        }
+
+    def _next_action_message(self, player, actions):
+        current = self.current_player()
+        if not current:
+            return "게임 시작을 기다리고 있습니다."
+        if current.id != player.id:
+            return f"{current.nickname}의 행동을 기다리는 중입니다."
+        pending = self.state.pending_action or {}
+        if actions["revive"]["allowed"]:
+            return "부활하여 게임에 복귀하세요."
+        if actions["purchase_land"]["allowed"]:
+            return f"{self.region_by_id(pending['region_id'])['name']} 토지를 구매하거나 포기하세요."
+        if actions["purchase_special"]["allowed"]:
+            special_id = pending.get("special_region_id")
+            special = next(
+                (item for item in self.data["special_regions"] if item["id"] == special_id),
+                {},
+            )
+            name = special.get("name", special_id)
+            return f"{name}을 구매하거나 포기하세요."
+        if actions["build"]["allowed"]:
+            return "건물 유형을 선택해 건설하거나 이번 방문 건설을 건너뛰세요."
+        if actions["roll"]["allowed"]:
+            return "주사위를 굴리세요."
+        if self.state.land_trade_offer or self.state.operating_right_offer or self.state.usage_change_request:
+            return "거래 또는 승인 응답을 기다리는 중입니다."
+        if actions["end_turn"]["allowed"]:
+            return "추가 행동을 선택하거나 턴을 종료하세요."
+        return "현재 가능한 행동을 확인하세요."
+
+    def _action_priority(self, player, actions):
+        primary = []
+        pending = self.state.pending_action or {}
+        if actions["revive"]["allowed"]:
+            primary = ["revive"]
+        elif actions["purchase_land"]["allowed"]:
+            primary = ["purchase_land", "decline_action"]
+        elif actions["purchase_special"]["allowed"]:
+            primary = ["purchase_special", "decline_action"]
+        elif actions["build"]["allowed"] and pending.get("type") == "build":
+            primary = ["build", "decline_action"]
+        elif actions["roll"]["allowed"]:
+            primary = ["roll"]
+        elif actions["end_turn"]["allowed"]:
+            primary = ["end_turn"]
+        secondary = [
+            name for name in ("build", "manage", "trade", "end_turn")
+            if actions.get(name, {}).get("allowed") and name not in primary
+        ]
+        return {"primary": primary, "secondary": secondary}
 
     def _action(self, allowed, reason="", **details):
         return {"allowed": bool(allowed), "reason": "" if allowed else reason, **details}
@@ -1922,6 +2141,8 @@ class GameEngine:
         edit_used = self.state.successful_build_edit_this_visit
         land_purchased = self.state.land_purchased_this_visit
         request_active = bool(self.state.land_trade_offer or self.state.operating_right_offer or self.state.usage_change_request)
+        step_id = (self.state.turn_step or {}).get("step_id")
+        step_reason = "현재 단계의 결과를 먼저 확인하세요."
         current_buildings = [item for item in self.state.buildings if item["region_id"] == current_region_id]
         owned_current = bool(current_region_id and self.state.land_ownership.get(current_region_id) == player.id)
         chain_buildings = [item for item in current_buildings if player.id in item.get("ownership_chain", [])]
@@ -1951,12 +2172,17 @@ class GameEngine:
             item["nominal_owner_id"] == player.id and len(item.get("ownership_chain", [])) == 1
             for item in current_buildings
         )
-        can_manage = is_turn and bool(current_region_id) and bool(chain_buildings or owned_current) and not edit_used and not request_active and not land_purchased
-        purchase_pending = bool(pending and pending.get("type") == "purchase_land")
-        build_pending = bool(pending and pending.get("type") == "build")
+        can_manage = is_turn and step_id in {"MANAGEMENT_DECISION", "TRADE_CONFIGURATION"} and bool(current_region_id) and bool(chain_buildings or owned_current) and not edit_used and not request_active and not land_purchased
+        purchase_pending = bool(pending and pending.get("type") == "purchase_land" and step_id == "LAND_PURCHASE_DECISION")
+        special_pending = bool(pending and pending.get("type") == "purchase_special" and step_id == "SPECIAL_PURCHASE_DECISION")
+        build_pending = bool(pending and pending.get("type") == "build" and step_id in {"BUILD_DECISION", "MANAGEMENT_DECISION", "BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION"})
+        build_allowed = build_allowed and build_pending
         actions = {
-            "roll": self._action(is_turn and not self.state.turn_has_rolled, "이미 주사위를 굴렸습니다." if is_turn else turn_reason),
-            "end_turn": self._action(is_turn, turn_reason),
+            "roll": self._action(is_turn and not self.state.turn_has_rolled and step_id == "ROLL_DECISION", step_reason if is_turn else turn_reason),
+            "end_turn": self._action(
+                is_turn and not pending and step_id in {"MANAGEMENT_DECISION", "TURN_END_DECISION"},
+                "먼저 도착 칸의 선택과 결과 확인을 완료하세요." if is_turn else turn_reason,
+            ),
             "purchase_land": self._action(
                 purchase_pending,
                 "구매 가능한 토지에 도착하지 않았습니다.",
@@ -1967,8 +2193,8 @@ class GameEngine:
             ),
             "decline_land_purchase": self._action(purchase_pending, "포기할 토지 구매 제안이 없습니다."),
             "decline_build": self._action(build_pending, "포기할 건설 제안이 없습니다."),
-            "decline_action": self._action(bool(pending), "포기할 대기 행동이 없습니다."),
-            "purchase_special": self._action(bool(pending and pending.get("type") == "purchase_special"), "구매 가능한 특수지역에 도착하지 않았습니다."),
+            "decline_action": self._action(purchase_pending or special_pending or build_pending, "현재 단계에서 포기할 행동이 없습니다."),
+            "purchase_special": self._action(special_pending, "구매 가능한 특수지역에 도착하지 않았습니다."),
             "build": self._action(
                 build_allowed,
                 build_reason,
@@ -2278,6 +2504,17 @@ class GameEngine:
             raise GameRuleError("turn_limit_seconds is not allowed")
         if config.bot_action_delay not in ALLOWED_BOT_DELAYS:
             raise GameRuleError("bot_action_delay is not allowed")
+        if config.step_time_preset not in STEP_TIME_PRESETS:
+            raise GameRuleError("step_time_preset is not allowed")
+        if config.turn_total_limit_seconds is not None and not 30 <= config.turn_total_limit_seconds <= 600:
+            raise GameRuleError("turn_total_limit_seconds must be 30..600 or unlimited")
+        if config.reconnect_grace_seconds not in {0, 5, 10}:
+            raise GameRuleError("reconnect_grace_seconds must be 0, 5, or 10")
+        for step_id, seconds in config.step_time_limits.items():
+            if step_id not in self.DEFAULT_STEP_LIMITS:
+                raise GameRuleError(f"unsupported step time limit: {step_id}")
+            if seconds is not None and not 5 <= seconds <= 120:
+                raise GameRuleError(f"step time limit for {step_id} must be 5..120")
         for index, slot_type in enumerate(config.slot_types):
             if slot_type not in {"human", "bot"}:
                 raise GameRuleError(f"slot_types[{index}] must be human or bot")
@@ -2367,16 +2604,161 @@ class GameEngine:
     def _find_building(self, building_id):
         return next((building for building in self.state.buildings if building["id"] == building_id), None)
 
+    def _effective_step_limits(self):
+        preset = self.state.config.step_time_preset
+        if preset == "unlimited":
+            return {step_id: None for step_id in self.DEFAULT_STEP_LIMITS}
+        if preset == "fast":
+            limits = {step_id: (15 if step_id in {"BUILD_DECISION", "BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION", "MANAGEMENT_DECISION", "TRADE_CONFIGURATION"} else 10) for step_id in self.DEFAULT_STEP_LIMITS}
+        elif preset == "leisurely":
+            limits = {step_id: (40 if step_id in {"BUILD_DECISION", "BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION", "MANAGEMENT_DECISION", "TRADE_CONFIGURATION"} else 25) for step_id in self.DEFAULT_STEP_LIMITS}
+        else:
+            limits = dict(self.DEFAULT_STEP_LIMITS)
+        if preset == "custom":
+            limits.update(self.state.config.step_time_limits)
+        return limits
+
+    def _step_duration(self, step_id):
+        if self.state.config.fast_simulation:
+            return None
+        return self._effective_step_limits().get(step_id)
+
+    def _current_step_elapsed(self):
+        step = self.state.turn_step
+        if not step or not step.get("user_input_required") or step.get("status") != "active" or self.state.paused:
+            return 0.0
+        return max(0.0, monotonic() - step["started_at"])
+
+    def turn_total_input_elapsed_seconds(self):
+        return self.state.turn_total_input_elapsed + self._current_step_elapsed()
+
+    def _set_turn_step(self, step_id, reason, *, player_id=None, next_step=None):
+        player = self.current_player()
+        player_id = player_id or (player.id if player else None)
+        current = self.state.turn_step
+        if current and current.get("step_id") == step_id and current.get("player_id") == player_id and current.get("status") == "active":
+            if next_step is not None:
+                current["next_step"] = next_step
+            return current
+        now = monotonic()
+        previous_elapsed = 0.0
+        if current and current.get("status") == "active":
+            if current.get("user_input_required"):
+                previous_elapsed = max(0.0, now - current["started_at"])
+                self.state.turn_total_input_elapsed += previous_elapsed
+            current["status"] = "completed"
+        self.state.turn_step_sequence += 1
+        user_input = step_id in self.USER_INPUT_STEPS
+        duration = self._step_duration(step_id) if user_input else None
+        step = {
+            "turn_id": f"turn_{self.state.game_instance_id}_{self.state.turn_sequence}",
+            "step_id": step_id,
+            "step_sequence": self.state.turn_step_sequence,
+            "player_id": player_id,
+            "label": self.STEP_LABELS.get(step_id, step_id),
+            "started_at": now,
+            "deadline_at": now + duration if duration is not None else None,
+            "duration_seconds": duration,
+            "timeout_action": self.STEP_TIMEOUT_ACTIONS.get(step_id),
+            "user_input_required": user_input,
+            "status": "active",
+        }
+        if next_step:
+            step["next_step"] = next_step
+        self.state.turn_step = step
+        transition = {
+            "turn_id": step["turn_id"], "player_id": player_id,
+            "from_step": current.get("step_id") if current else None, "to_step": step_id,
+            "reason": reason, "started_at": now, "previous_elapsed_seconds": round(previous_elapsed, 3),
+        }
+        self.state.turn_step_history.append(transition)
+        self.state.turn_step_history = self.state.turn_step_history[-100:]
+        self._log("turn_step", "step_transition", transition)
+        return step
+
+    def _public_turn_step(self):
+        step = self.state.turn_step
+        if not step:
+            return None
+        result = deepcopy(step)
+        deadline = result.get("deadline_at")
+        if self.state.paused:
+            effective_now = self.state.pause_started_at or monotonic()
+        else:
+            effective_now = monotonic()
+        result["remaining_seconds"] = None if deadline is None else max(0, round(deadline - effective_now, 1))
+        return result
+
+    def turn_total_remaining_seconds(self):
+        limit = self.state.config.turn_total_limit_seconds
+        if limit is None or self.state.config.fast_simulation:
+            return None
+        return max(0, round(limit - self.turn_total_input_elapsed_seconds(), 1))
+
+    def complete_turn_presentation(self, player_id, expected_step_sequence=None):
+        self._require_current_player(player_id)
+        step = self.state.turn_step or {}
+        if expected_step_sequence is not None and int(expected_step_sequence) != step.get("step_sequence"):
+            raise GameRuleError("turn step changed; refresh the current state")
+        if step.get("user_input_required"):
+            return self.public_state()
+        if step.get("step_id") == "TRADE_RESPONSE" and (self.state.land_trade_offer or self.state.operating_right_offer):
+            return self.public_state()
+        if step.get("step_id") == "USAGE_CHANGE_RESPONSE" and self.state.usage_change_request:
+            return self.public_state()
+        next_step = step.get("next_step") or self._decision_step_after_presentation(player_id)
+        self._set_turn_step(next_step, "presentation_completed", player_id=player_id)
+        return self.public_state()
+
+    def _decision_step_after_presentation(self, player_id):
+        pending = self.state.pending_action or {}
+        if pending.get("player_id") == player_id:
+            if pending.get("type") == "build" and pending.get("source") == "owned_land_visit":
+                return "MANAGEMENT_DECISION"
+            return {"purchase_land": "LAND_PURCHASE_DECISION", "purchase_special": "SPECIAL_PURCHASE_DECISION", "build": "BUILD_DECISION"}.get(pending.get("type"), "MANAGEMENT_DECISION")
+        return "TURN_END_DECISION"
+
+    def enter_build_step(self, player_id, step_id):
+        self._require_current_player(player_id)
+        if step_id not in {"BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION"}:
+            raise GameRuleError("unsupported build step")
+        pending = self._require_pending(player_id, "build")
+        current = (self.state.turn_step or {}).get("step_id")
+        allowed = {"BUILD_TYPE_SELECTION": {"BUILD_DECISION", "MANAGEMENT_DECISION", "BUILD_TYPE_SELECTION"}, "BUILD_CONFIRMATION": {"BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION"}}
+        if current not in allowed[step_id]:
+            raise GameRuleError("build step cannot transition from current state")
+        self._set_turn_step(step_id, "build_ui_advanced", player_id=pending["player_id"])
+        return self.public_state()
+
+    def enter_management_step(self, player_id, step_id):
+        self._require_current_player(player_id)
+        if step_id not in {"MANAGEMENT_DECISION", "TRADE_CONFIGURATION"}:
+            raise GameRuleError("unsupported management step")
+        current = (self.state.turn_step or {}).get("step_id")
+        if current not in {"MANAGEMENT_DECISION", "TRADE_CONFIGURATION"}:
+            raise GameRuleError("management step cannot transition from current state")
+        self._set_turn_step(step_id, "management_ui_changed", player_id=player_id)
+        return self.public_state()
+
     def _start_turn(self):
         self.state.turn_sequence += 1
         self.state.turn_started_at = monotonic()
         self.state.turn_elapsed_before_pause = 0
         self.state.turn_has_rolled = False
+        self.state.turn_total_input_elapsed = 0
         self.state.pending_action = None
         self.state.land_purchased_this_visit = False
         self.state.successful_build_edit_this_visit = False
+        player = self.current_player()
+        self._set_turn_step("ROLL_DECISION", "turn_started", player_id=player.id if player else None)
 
     def _finish_turn(self, player_id):
+        self._set_turn_step("TURN_COMPLETE", "turn_finished", player_id=player_id)
+        if self.state.event_timer_pause:
+            self._resume_event_timer(
+                self.state.event_timer_pause.get("player_id"),
+                self.state.event_timer_pause.get("occurrence_id"),
+            )
         active = self._turn_players()
         if not active:
             self.finalize_game("no_active_players")
@@ -2434,8 +2816,78 @@ class GameEngine:
         return [((start + step) % BOARD_SIZE) for step in range(1, int(dice) + 1)]
 
     def _turn_timed_out(self):
-        limit = self.state.config.turn_limit_seconds
-        return limit is not None and self.elapsed_turn_seconds() >= limit
+        return self._turn_total_timed_out() or self._step_timed_out()
+
+    def _step_timed_out(self):
+        step = self.state.turn_step or {}
+        deadline = step.get("deadline_at")
+        return bool(step.get("user_input_required") and deadline is not None and monotonic() >= deadline)
+
+    def _turn_total_timed_out(self):
+        remaining = self.turn_total_remaining_seconds()
+        return remaining is not None and remaining <= 0
+
+    def _handle_step_timeout(self):
+        step = self.state.turn_step or {}
+        player = self.current_player()
+        if not player or not step.get("user_input_required"):
+            return
+        step_id = step.get("step_id")
+        automatic_action = step.get("timeout_action")
+        self._log("turn_step", "step_timeout", {
+            "turn_id": step.get("turn_id"), "player_id": player.id, "step_id": step_id,
+            "step_sequence": step.get("step_sequence"), "result": "timeout", "automatic_action": automatic_action,
+        })
+        self.state.last_step_timeout = {
+            "turn_id": step.get("turn_id"), "player_id": player.id, "step_id": step_id,
+            "step_sequence": step.get("step_sequence"), "automatic_action": automatic_action,
+            "message": f"{step.get('label', step_id)} 시간이 끝나 기본 행동을 적용했습니다.",
+        }
+        if step_id == "EVENT_CONFIRMATION":
+            self._record_activity(player)
+        else:
+            self._record_no_action(player, f"step_timeout:{step_id}")
+        timeout_count = self.state.no_action_counts.get(player.id, 0)
+        if player.status == "exited":
+            self._finish_turn(player.id)
+            return
+        if step_id == "ROLL_DECISION":
+            self.roll_dice(player.id)
+            self.state.no_action_counts[player.id] = timeout_count
+        elif step_id in {"LAND_PURCHASE_DECISION", "SPECIAL_PURCHASE_DECISION", "BUILD_DECISION", "BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION"}:
+            self.decline_pending_action(player.id)
+            self.complete_turn_presentation(player.id)
+        elif step_id in {"MANAGEMENT_DECISION", "TRADE_CONFIGURATION"}:
+            self._set_turn_step("TURN_END_DECISION", "management_timeout", player_id=player.id)
+        elif step_id == "EVENT_CONFIRMATION":
+            visible = [item for item in self._visible_event_occurrences(player) if item["occurrence_id"] not in self.state.event_acknowledged_occurrences.get(player.id, set())]
+            if visible:
+                self.acknowledge_events(player.id, len(self.state.event_history), visible[0]["occurrence_id"])
+            self._set_turn_step("TURN_END_DECISION", "event_timeout_acknowledged", player_id=player.id)
+        elif step_id == "BANKRUPTCY_TAKEOVER" and self.state.pending_land_takeover:
+            self.respond_land_takeover(player.id, False)
+        elif step_id in {"TURN_END_DECISION", "REVIVAL_DECISION"}:
+            self._finish_turn(player.id)
+
+    def _handle_turn_total_timeout(self):
+        player = self.current_player()
+        if not player:
+            return
+        step = self.state.turn_step or {}
+        self._log("turn_step", "turn_total_timeout", {
+            "turn_id": step.get("turn_id"), "player_id": player.id, "step_id": step.get("step_id"),
+            "result": "timeout", "automatic_action": "finish_turn",
+        })
+        self.state.last_step_timeout = {
+            "turn_id": step.get("turn_id"), "player_id": player.id, "step_id": step.get("step_id"),
+            "step_sequence": step.get("step_sequence"), "automatic_action": "finish_turn",
+            "message": "턴 전체 선택시간 상한에 도달해 턴을 자동 종료했습니다.",
+        }
+        self._record_no_action(player, "turn_total_timeout")
+        self.state.pending_action = None
+        self.state.land_trade_offer = None
+        self.state.operating_right_offer = None
+        self._finish_turn(player.id)
 
     def _resolve_arrival(self, player):
         self.state.pending_action = None
@@ -2648,8 +3100,10 @@ class GameEngine:
     def expire_operating_right_offer(self):
         if self.state.operating_right_offer and monotonic() - self.state.operating_right_offer["created_at"] >= self.state.operating_right_offer.get("timeout_seconds", 10):
             self._log("request", "operating_right_expired", deepcopy(self.state.operating_right_offer))
+            requester_id = self.state.operating_right_offer.get("requester_id")
             self.state.operating_right_offer = None
             self.state.turn_started_at = monotonic()
+            self._set_turn_step("RESULT_CONFIRMATION", "operating_right_timed_out", player_id=requester_id, next_step="MANAGEMENT_DECISION")
         return self.public_state()
 
     def _execute_usage_change(self):
@@ -2678,6 +3132,7 @@ class GameEngine:
         self.state.successful_build_edit_this_visit = True
         self._log("request", "usage_change_approved", {"requester_id": requester.id, "building_id": building["id"], "new_type": building["building_type"], "cost_won": request["cost_won"]})
         self.state.usage_change_request = None
+        self._set_turn_step("RESULT_CONFIRMATION", "usage_change_approved", player_id=requester.id, next_step="TURN_END_DECISION")
 
     def _validate_land_trade(self, requester, buyer, region_id):
         self.region_by_id(region_id)
@@ -2737,6 +3192,8 @@ class GameEngine:
         cached = self.settlement_service.cached(player)
         if cached is not None:
             return cached
+        cash_before = player.cash_won
+        loan_before = deepcopy(self.state.loans.get(player.id))
         self.state.lap_numbers[player.id] = self.state.lap_numbers.get(player.id, 0) + 1
         ledger = self._open_ledger(player)
         ledger["lap_number"] = self.state.lap_numbers.get(player.id, 0)
@@ -2790,6 +3247,23 @@ class GameEngine:
         settlement["ledger"] = deepcopy(self._ledger(player))
         settlement["cash_after"] = player.cash_won
         settlement["status_after"] = player.status
+        loan_after = deepcopy(self.state.loans.get(player.id))
+        new_loan_won = 0
+        if loan_after and not loan_before:
+            new_loan_won = int(loan_after.get("principal_won", 0))
+        settlement["settlement_steps"] = [
+            {"type": "building_income", "label": "산업·복합 수익", "amount_won": int(ledger.get("gross_income", 0))},
+            {"type": "building_loss", "label": "산업·복합 손실", "amount_won": -int(ledger.get("losses", 0))},
+            {"type": "taxable_income", "label": "과세소득", "amount_won": int(ledger.get("taxable_income", 0))},
+            {"type": "tax", "label": "세금", "amount_won": -int(ledger.get("tax_due", 0))},
+            {"type": "start_bonus", "label": "출발지 보너스", "amount_won": int(ledger.get("start_bonus", 0))},
+            {"type": "loan_repayment", "label": "대출 상환", "amount_won": -int(ledger.get("loan_payment", 0))},
+            {"type": "new_loan", "label": "신규 긴급대출", "amount_won": new_loan_won},
+            {"type": "final_cash", "label": "정산 후 현금", "amount_won": int(player.cash_won)},
+        ]
+        settlement["cash_before"] = int(cash_before)
+        settlement["total_income_won"] = sum(max(0, step["amount_won"]) for step in settlement["settlement_steps"][:-1])
+        settlement["total_expense_won"] = -sum(min(0, step["amount_won"]) for step in settlement["settlement_steps"][:-1])
         self._log("settlement", "final_cash_confirmed", {"player_id": player.id, "cash_won": player.cash_won})
         self.state.last_settlement = settlement
         settlement["steps"].append("9. ready_for_turn_end")
@@ -2890,6 +3364,13 @@ class GameEngine:
             "round": self.state.global_round,
             "turn_sequence": self.state.turn_sequence,
         }
+        arrival = self._current_arrival(player)
+        if arrival:
+            entry.update({
+                "arrival_id": arrival["arrival_id"],
+                "action_id": arrival["action_id"],
+                "state_version": self.state.state_version + 1,
+            })
         ledger["income_entries"].append(entry)
         ledger["gross_income"] += int(amount)
         if taxable:
@@ -2898,8 +3379,7 @@ class GameEngine:
 
     def _add_expense(self, player, amount, source, region_id=None, building_id=None, counterparty_player_id=None):
         ledger = self._open_ledger(player)
-        ledger["expense_entries"].append(
-            {
+        entry = {
                 "source": source,
                 "amount_won": int(amount),
                 "region_id": region_id,
@@ -2909,7 +3389,14 @@ class GameEngine:
                 "round": self.state.global_round,
                 "turn_sequence": self.state.turn_sequence,
             }
-        )
+        arrival = self._current_arrival(player)
+        if arrival:
+            entry.update({
+                "arrival_id": arrival["arrival_id"],
+                "action_id": arrival["action_id"],
+                "state_version": self.state.state_version + 1,
+            })
+        ledger["expense_entries"].append(entry)
         self._log("money", "expense_recorded", {"player_id": player.id, "source": source, "amount_won": int(amount)})
 
     def _calculate_tax_rate_bps(self, player):

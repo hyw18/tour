@@ -21,7 +21,10 @@ def test_player_page_contains_assets_management_and_request_controls():
     app = create_app({"TESTING": True})
     html = app.test_client().get("/player").get_data(as_text=True)
     for element_id in (
-        "assetPanel",
+        "financeAssetsPanel",
+        "financeTaxPanel",
+        "financeLoanPanel",
+        "financeHistoryPanel",
         "requestPanel",
         "managementPanel",
         "manageAction",
@@ -33,7 +36,7 @@ def test_player_page_contains_assets_management_and_request_controls():
         assert f'id="{element_id}"' in html
     assert 'id="manageAction" hidden' not in html
     assert 'id="tradeAction" hidden' not in html
-    assert "규칙 결정 대기" in html
+    assert "규칙 결정 대기" not in html
 
 
 def test_player_javascript_connects_every_existing_player_mutation_and_deduplicates_clicks():
@@ -82,6 +85,7 @@ def test_private_state_has_server_allowed_actions_and_complete_asset_details():
     engine.create_land_ownership(owner["id"], "gimcheon")
     engine.create_building(owner["id"], "gimcheon", "commercial")
     engine.set_player_position(owner["id"], 1)
+    engine._set_turn_step("MANAGEMENT_DECISION", "test_management", player_id=owner["id"])
 
     private = engine.player_private_state(owner["id"])
     assert private["allowed_actions"]["manage"]["allowed"] is True

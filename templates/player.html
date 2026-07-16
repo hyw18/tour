@@ -6,7 +6,7 @@
     <title>경제 보드게임 플레이어</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
-  <body class="player-screen">
+  <body class="player-screen" data-app-mode="{{ config.get('APP_MODE', 'production') }}">
     <div class="portrait-warning">
       <strong>가로 모드로 전환</strong>
       <span>현재 연결과 게임 상태는 유지됩니다.</span>
@@ -33,8 +33,7 @@
           <button id="openFinance" type="button">자산·재무</button>
         </section>
       </header>
-      <p class="rule-pending-notice topbar-rule-notice">규칙 결정 대기: 미개발 토지세 0.5%p · 이벤트 카드 공식 승인 · 복합 건물 최종 정산가</p>
-
+      <nav id="turnStepIndicator" class="turn-step-indicator" aria-label="현재 턴 진행 단계"></nav>
       <section class="player-layout">
         <section class="board-zone">
           <div class="table-rail">
@@ -55,33 +54,50 @@
         </section>
 
         <aside class="command-zone">
-          <div class="dice-dock">
-            <button id="rollDice" class="primary-action">주사위</button>
-            <button id="endTurn" class="primary-action ruby">턴 종료</button>
+          <h2 class="command-title">지금 할 일</h2>
+          <div id="primaryActions" class="primary-actions" aria-label="주 행동">
+            <button id="rollDice" class="primary-action" data-action-name="roll">주사위 굴리기</button>
+            <button id="endTurn" class="primary-action ruby" data-action-name="end_turn">턴 종료</button>
           </div>
-          <div class="actions command-grid">
+          <div id="secondaryActions" class="actions command-grid" aria-label="보조 행동">
             <button id="purchaseLand">토지 구매</button>
             <button id="purchaseSpecial">특수지역 구매</button>
             <button id="declineAction">포기</button>
+            <label id="buildingTypeField" hidden>건물 유형
             <select id="buildingType">
+              <option value="" selected>건물 유형 선택</option>
               <option value="residential">주거</option>
               <option value="commercial">상업</option>
               <option value="industrial">산업</option>
               <option value="mixed_use">복합</option>
-            </select>
+            </select></label>
             <button id="build">건설</button>
             <button id="manageAction">관리</button>
             <button id="tradeAction">거래</button>
             <button id="reviveAction">부활</button>
+          </div>
+          <details id="otherActions" class="other-actions">
+            <summary>다른 행동과 설정</summary>
+            <div id="unavailableActions" class="unavailable-actions" aria-label="현재 사용할 수 없는 행동"></div>
             <label class="animation-setting">화면 연출
               <select id="animationPreference">
+                <option value="leisurely">여유롭게</option>
                 <option value="full">기본</option>
                 <option value="fast">빠르게</option>
                 <option value="minimal">애니메이션 최소화</option>
               </select>
             </label>
+            <button id="replayHelp" type="button">도움말 다시 보기</button>
+            <label class="help-setting"><input id="contextHelpEnabled" type="checkbox" checked> 상황별 도움말 사용</label>
             <span class="sound-setting" title="효과음은 아직 구현되지 않았습니다.">효과음 준비 중</span>
-          </div>
+          </details>
+          <div id="disabledActionHelp" class="disabled-action-help" role="status"></div>
+          <section id="resultSummary" class="result-summary" hidden aria-live="polite">
+            <strong id="resultSummaryTitle"></strong>
+            <span id="resultSummaryDetail"></span>
+            <span id="resultSummaryNext"></span>
+            <button id="continuePresentation" type="button">계속</button>
+          </section>
           <div id="actionMessage" class="action-message" role="status"></div>
         </aside>
       </section>
@@ -92,6 +108,7 @@
         <section class="panel-dialog-card">
           <header><h2 id="rankingTitle">전체 순위표</h2><button id="closeRankings" type="button">닫기</button></header>
           <div id="rankingList" class="ranking-list" aria-live="polite">
+            <p class="ranking-help">순위는 서버의 공식 자산·파산 규칙으로 계산됩니다. 다른 플레이어의 현금·세금·대출은 공개하지 않습니다.</p>
             <section id="rankedPlayers" class="ranking-group"><h3>공식 순위</h3><div id="rankedPlayerRows"></div></section>
             <section id="unrankedPlayers" class="ranking-group" hidden><h3>순위 없음</h3><div id="unrankedPlayerRows"></div></section>
           </div>
@@ -101,15 +118,17 @@
       <div id="financeModal" class="panel-dialog finance-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="financeTitle">
         <section class="panel-dialog-card">
           <header><h2 id="financeTitle">자산·재무</h2><button id="closeFinance" type="button">닫기</button></header>
-          <nav class="finance-tabs" aria-label="자산·재무 항목">
-            <button class="active" type="button" data-finance-tab="assets">자산</button>
-            <button type="button" data-finance-tab="tax">세금·정산</button>
-            <button type="button" data-finance-tab="loan">대출</button>
-            <button type="button" data-finance-tab="history">최근 내역</button>
+          <nav class="finance-tabs" aria-label="자산·재무 항목" role="tablist">
+            <button id="financeAssetsTab" class="active" type="button" role="tab" aria-selected="true" aria-controls="financeAssetsPanel" data-finance-tab="assets">자산</button>
+            <button id="financeTaxTab" type="button" role="tab" aria-selected="false" aria-controls="financeTaxPanel" data-finance-tab="tax">세금·정산</button>
+            <button id="financeLoanTab" type="button" role="tab" aria-selected="false" aria-controls="financeLoanPanel" data-finance-tab="loan">대출</button>
+            <button id="financeHistoryTab" type="button" role="tab" aria-selected="false" aria-controls="financeHistoryPanel" data-finance-tab="history">최근 내역</button>
           </nav>
           <div id="financeScroll" class="panel-dialog-scroll">
-            <article id="assetPanel" class="finance-panel"></article>
-            <article id="settlementPanel" class="finance-panel" data-finance-pane="tax"></article>
+            <article id="financeAssetsPanel" class="finance-panel" role="tabpanel" aria-labelledby="financeAssetsTab"></article>
+            <article id="financeTaxPanel" class="finance-panel" role="tabpanel" aria-labelledby="financeTaxTab" hidden></article>
+            <article id="financeLoanPanel" class="finance-panel" role="tabpanel" aria-labelledby="financeLoanTab" hidden></article>
+            <article id="financeHistoryPanel" class="finance-panel" role="tabpanel" aria-labelledby="financeHistoryTab" hidden></article>
           </div>
         </section>
       </div>
@@ -155,7 +174,6 @@
               <p id="eventRevealDescription"></p>
               <dl id="eventRevealDetails"></dl>
               <ul id="eventRevealEffects"></ul>
-              <p class="rule-pending-notice">이벤트 카드 공식 승인 결정 대기</p>
             </div>
           </article>
           <div class="event-reveal-actions">
@@ -170,6 +188,19 @@
           <span id="economicReason"></span>
           <span id="economicTransfer"></span>
           <button id="skipEconomicAnimation" type="button">연출 건너뛰기</button>
+        </section>
+      </div>
+
+      <div id="helpModal" class="panel-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+        <section class="panel-dialog-card help-card">
+          <header><h2 id="helpTitle">한 턴 시작하기</h2><button id="closeHelp" type="button">닫기</button></header>
+          <div class="panel-dialog-scroll">
+            <ol id="helpSteps">
+              <li>주사위를 굴려 보드 위에서 이동합니다.</li>
+              <li>도착한 칸에서 구매·건설·거래 중 가능한 행동을 선택합니다.</li>
+              <li>자세한 자산과 세금은 <strong>자산·재무</strong>에서 확인합니다.</li>
+            </ol>
+          </div>
         </section>
       </div>
     </main>

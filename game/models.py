@@ -10,6 +10,7 @@ BOARD_SIZE = 40
 ALLOWED_SLOTS = {2, 3, 4}
 ALLOWED_ROUNDS = range(10, 301)
 ALLOWED_TURN_LIMITS = {15, 30, 45, 60, 75, 90, None}
+STEP_TIME_PRESETS = {"fast", "default", "leisurely", "custom", "unlimited"}
 ALLOWED_BOT_DELAYS = {0, 0.5, 1, 2}
 PLAYER_STATUSES = {"lobby", "active", "bankrupt", "spectator", "exited"}
 BOT_STRATEGIES = {"balanced", "aggressive", "conservative", "random"}
@@ -71,6 +72,10 @@ class HostConfig:
     turn_limit_seconds: int | None = 30
     bot_action_delay: float = 1
     fast_simulation: bool = False
+    step_time_preset: str = "default"
+    step_time_limits: dict[str, int | None] = field(default_factory=dict)
+    turn_total_limit_seconds: int | None = 120
+    reconnect_grace_seconds: int = 0
 
     def normalize(self):
         self.slot_types = self.slot_types[: self.total_slots]
@@ -97,6 +102,12 @@ class GameState:
     turn_elapsed_before_pause: float = 0
     turn_has_rolled: bool = False
     turn_sequence: int = 0
+    turn_step: dict | None = None
+    turn_step_sequence: int = 0
+    turn_total_input_elapsed: float = 0
+    turn_step_history: list = field(default_factory=list)
+    last_step_timeout: dict | None = None
+    step_reconnect_graces: set = field(default_factory=set)
     last_dice: int | None = None
     last_roll: dict | None = None
     economic_actions: list = field(default_factory=list)
@@ -108,6 +119,7 @@ class GameState:
     reconnect_token_hashes: dict[str, str] = field(default_factory=dict)
     event_ack_versions: dict[str, int] = field(default_factory=dict)
     event_acknowledged_occurrences: dict[str, set[str]] = field(default_factory=dict)
+    event_timer_pause: dict | None = None
     forced_dice_once: int | None = None
     bot_auto_enabled: bool = False
     land_ownership: dict = field(default_factory=dict)
@@ -168,6 +180,12 @@ class GameState:
         self.turn_elapsed_before_pause = 0
         self.turn_has_rolled = False
         self.turn_sequence = 0
+        self.turn_step = None
+        self.turn_step_sequence = 0
+        self.turn_total_input_elapsed = 0
+        self.turn_step_history.clear()
+        self.last_step_timeout = None
+        self.step_reconnect_graces.clear()
         self.last_dice = None
         self.last_roll = None
         self.economic_actions.clear()

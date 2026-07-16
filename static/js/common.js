@@ -32,8 +32,9 @@ async function postJson(url, body, options = {}) {
   }
   const data = await response.json();
   if (!response.ok) {
-    const error = new Error(data.error || "request failed");
+    const error = new Error(data.user_message || data.error || "요청을 처리하지 못했습니다.");
     error.status = response.status;
+    error.code = data.error_code;
     throw error;
   }
   return data;
