@@ -1,6 +1,9 @@
 from copy import deepcopy
 from fractions import Fraction
+from hashlib import sha256
+from hmac import compare_digest
 from random import Random, randint
+from secrets import token_urlsafe
 from time import monotonic
 
 from .data_loader import GameDataLoader
@@ -69,6 +72,192 @@ class GameEngine:
     def run_serialized(self, operation):
         """Run one state operation under the game-wide reentrant lock."""
         return self.repository.serialized(operation)
+
+    def mark_state_changed(self):
+        self.state.state_version += 1
+        if self.state.final_results is not None:
+            self.state.final_results["state_version"] = self.state.state_version
+        return self.state.state_version
+
+    def economic_snapshot(self):
+        """Capture authoritative values used only to describe a completed mutation."""
+        return {
+            "cash": {player.id: player.cash_won for player in self.state.players},
+            "buildings": {item["id"]: deepcopy(item) for item in self.state.buildings},
+            "land_ownership": dict(self.state.land_ownership),
+            "special_ownership": dict(self.state.special_ownership),
+            "refunds": deepcopy(self.state.pending_commercial_sale_refunds),
+            "loans": deepcopy(self.state.loans),
+            "last_settlement": deepcopy(self.state.last_settlement),
+            "log_index": len(self.state.game_log),
+        }
+
+    def record_economic_action(self, action_type, actor_player_id, before, context=None):
+        """Describe server-confirmed economic changes without performing any calculation."""
+        after_cash = {player.id: player.cash_won for player in self.state.players}
+        money_logs = [
+            entry for entry in self.state.game_log[before["log_index"]:]
+            if entry.get("category") == "money" and entry.get("message") in {"income_recorded", "expense_recorded"}
+        ]
+        cash_changes = []
+        logged_totals = {}
+        for entry in money_logs:
+            details = entry.get("details", {})
+            player_id = details.get("player_id")
+            if not player_id:
+                continue
+            amount = int(details.get("amount_won", 0))
+            if entry["message"] == "expense_recorded":
+                amount = -amount
+            logged_totals[player_id] = logged_totals.get(player_id, 0) + amount
+            cash_changes.append({
+                "player_id": player_id,
+                "amount_won": amount,
+                "reason": details.get("source", action_type),
+                "cash_before_won": before["cash"].get(player_id),
+                "cash_after_won": after_cash.get(player_id),
+            })
+        for player_id, final_cash in after_cash.items():
+            initial_cash = before["cash"].get(player_id, final_cash)
+            residual = final_cash - initial_cash - logged_totals.get(player_id, 0)
+            if residual:
+                cash_changes.append({
+                    "player_id": player_id,
+                    "amount_won": residual,
+                    "reason": action_type,
+                    "cash_before_won": initial_cash,
+                    "cash_after_won": final_cash,
+                })
+
+        after_buildings = {item["id"]: deepcopy(item) for item in self.state.buildings}
+        asset_changes = []
+        for building_id in after_buildings.keys() - before["buildings"].keys():
+            building = after_buildings[building_id]
+            asset_changes.append({"type": "building_added", "building_id": building_id, "region_id": building["region_id"], "building_type": building["building_type"]})
+        for building_id in before["buildings"].keys() - after_buildings.keys():
+            building = before["buildings"][building_id]
+            asset_changes.append({"type": "building_removed", "building_id": building_id, "region_id": building["region_id"], "building_type": building["building_type"]})
+        for building_id in before["buildings"].keys() & after_buildings.keys():
+            previous = before["buildings"][building_id]
+            current = after_buildings[building_id]
+            if previous != current:
+                asset_changes.append({
+                    "type": "building_updated",
+                    "building_id": building_id,
+                    "region_id": current["region_id"],
+                    "building_type_before": previous["building_type"],
+                    "building_type": current["building_type"],
+                    "ownership_chain_before": list(previous.get("ownership_chain", [])),
+                    "ownership_chain": list(current.get("ownership_chain", [])),
+                    "operator_player_id": current.get("operator_id"),
+                })
+        for region_id in set(before["land_ownership"]) | set(self.state.land_ownership):
+            previous = before["land_ownership"].get(region_id)
+            current = self.state.land_ownership.get(region_id)
+            if previous != current:
+                asset_changes.append({"type": "land_owner_changed", "region_id": region_id, "from_player_id": previous, "to_player_id": current})
+        for special_id in set(before["special_ownership"]) | set(self.state.special_ownership):
+            previous = before["special_ownership"].get(special_id)
+            current = self.state.special_ownership.get(special_id)
+            if previous != current:
+                asset_changes.append({"type": "special_owner_changed", "special_region_id": special_id, "from_player_id": previous, "to_player_id": current})
+        if before["refunds"] != self.state.pending_commercial_sale_refunds:
+            previous_refunds = {(item["player_id"], item["region_id"], item["created_lap"]): item for item in before["refunds"]}
+            current_refunds = {(item["player_id"], item["region_id"], item["created_lap"]): item for item in self.state.pending_commercial_sale_refunds}
+            for key in current_refunds.keys() - previous_refunds.keys():
+                refund = current_refunds[key]
+                asset_changes.append({"type": "scheduled_refund_added", "player_id": refund["player_id"], "region_id": refund["region_id"], "amount_won": refund["refund_won"]})
+            for key in previous_refunds.keys() - current_refunds.keys():
+                refund = previous_refunds[key]
+                asset_changes.append({"type": "scheduled_refund_paid", "player_id": refund["player_id"], "region_id": refund["region_id"], "amount_won": refund["refund_won"]})
+        if before["loans"] != self.state.loans:
+            asset_changes.append({"type": "loans_changed"})
+        if not cash_changes and not asset_changes:
+            return None
+
+        sources = [item["reason"] for item in cash_changes]
+        if action_type == "turn_economy":
+            if len(set(sources)) == 1:
+                action_type = {
+                    "land_fee": "visit_fee",
+                    "building_visit_fee": "visit_fee",
+                    "lap_building_return": "lap_income",
+                    "lap_building_loss": "lap_loss",
+                    "tax": "tax_payment",
+                    "start_bonus": "start_bonus",
+                    "commercial_sale_refund": "commercial_sale_refund",
+                }.get(sources[0], sources[0])
+            else:
+                action_type = "start_settlement"
+        related_players = {item["player_id"] for item in cash_changes}
+        for change in asset_changes:
+            related_players.update(filter(None, (
+                change.get("player_id"), change.get("from_player_id"), change.get("to_player_id"),
+                change.get("operator_player_id"),
+            )))
+            related_players.update(change.get("ownership_chain_before", []))
+            related_players.update(change.get("ownership_chain", []))
+        action = {
+            "action_id": new_id("econ"),
+            "action_type": action_type,
+            "actor_player_id": actor_player_id,
+            "related_player_ids": sorted(related_players),
+            "cash_changes": cash_changes,
+            "asset_changes": asset_changes,
+            "game_instance_id": self.state.game_instance_id,
+            "state_version": self.state.state_version + 1,
+            **deepcopy(context or {}),
+        }
+        if before["last_settlement"] != self.state.last_settlement:
+            action["settlement"] = deepcopy(self.state.last_settlement)
+        self.state.economic_actions.append(action)
+        self.state.economic_actions = self.state.economic_actions[-100:]
+        return deepcopy(action)
+
+    def automation_revision_marker(self):
+        return (
+            self.state.phase,
+            self.state.global_round,
+            self.state.turn_sequence,
+            self.state.current_turn_index,
+            self.state.paused,
+            self.state.ended,
+            repr(self.state.pending_action),
+            repr(self.state.land_trade_offer),
+            repr(self.state.operating_right_offer),
+            repr(self.state.usage_change_request),
+            repr(self.state.pending_land_takeover),
+            tuple((player.id, player.status, player.cash_won, player.position, len(player.lands), len(player.buildings)) for player in self.state.players),
+            len(self.state.buildings),
+            len(self.state.game_log),
+            tuple((event.get("id"), event.get("age_rounds")) for event in self.state.active_events),
+        )
+
+    def issue_reconnect_token(self, player_id):
+        player = self._find_player(player_id)
+        if not player or player.is_bot:
+            raise GameRuleError("player not found")
+        token = token_urlsafe(48)
+        self.state.reconnect_token_hashes[player_id] = self._reconnect_token_hash(token)
+        return token
+
+    def reconnect_player(self, player_id, reconnect_token, game_instance_id):
+        if game_instance_id != self.state.game_instance_id:
+            raise GameRuleError("previous game instance has expired")
+        player = self._find_player(player_id)
+        if not player:
+            raise LookupError("player not found")
+        if player.status == "exited":
+            raise PermissionError("automatically exited player cannot reconnect")
+        expected = self.state.reconnect_token_hashes.get(player_id)
+        supplied = self._reconnect_token_hash(str(reconnect_token or ""))
+        if not expected or not compare_digest(expected, supplied):
+            raise PermissionError("invalid reconnect token")
+        return player.public()
+
+    def _reconnect_token_hash(self, token):
+        material = f"{self.state.game_instance_id}:{token}".encode("utf-8")
+        return sha256(material).hexdigest()
 
     def configure(self, payload):
         self._require_lobby()
@@ -189,12 +378,27 @@ class GameEngine:
         self.state.turn_has_rolled = True
         start_position = player.position
         player.position = self._move_position(player.position, dice)
+        movement_path = self._movement_path(start_position, dice, player.position)
+        roll_result = {
+            "action": "dice_roll",
+            "action_id": new_id("roll"),
+            "dice": dice,
+            "player_id": player.id,
+            "from_position": start_position,
+            "to_position": player.position,
+            "position": player.position,
+            "movement_path": movement_path,
+            "passed_start": start_position != 0 and player.position == 0,
+            "stopped_at_start": start_position != 0 and player.position == 0,
+            "arrival_type": self.data["board"][player.position]["type"],
+        }
+        self.state.last_roll = deepcopy(roll_result)
         self._record_activity(player)
         self._log("turn", "dice_move", {"player_id": player.id, "dice": dice, "from": start_position, "to": player.position})
         if player.position == 0:
             self._settle_start(player)
         self._resolve_arrival(player)
-        return {"dice": dice, "position": player.position}
+        return roll_result
 
     def end_turn(self, player_id):
         player = self._require_current_player(player_id)
@@ -288,6 +492,77 @@ class GameEngine:
         self.state.pending_action = None
         self._log("asset", "building_built", {"player_id": player.id, "region_id": region_id, "building_type": building_type, "cost_won": price})
         return self.public_state()
+
+    def build_preview(self, player_id, region_id, building_type):
+        player = self._find_player(player_id)
+        if not player:
+            raise GameRuleError("player not found")
+        building_type = str(building_type)
+        if building_type not in BUILDING_TYPES:
+            raise GameRuleError("unsupported building type")
+        pending = self.state.pending_action
+        pending_matches = bool(
+            pending and pending.get("type") == "build" and pending.get("player_id") == player.id
+            and pending.get("region_id") == region_id
+        )
+        region = self.region_by_id(region_id)
+        price = int(self.data["building_prices"][region_id][building_type])
+        same_type_count = self._building_count(region_id, building_type)
+        limit = 1 if building_type in {"industrial", "mixed_use"} else None
+        reason = ""
+        if self.state.phase != "active" or self.state.paused or self.state.ended:
+            reason = "현재 게임 상태에서는 건설할 수 없습니다."
+        elif not self.current_player() or self.current_player().id != player.id:
+            reason = "현재 차례가 아닙니다."
+        elif not pending_matches:
+            reason = "현재 지역의 건설 기회가 유효하지 않습니다."
+        elif self.state.land_ownership.get(region_id) != player.id:
+            reason = "내 토지에만 건설할 수 있습니다."
+        elif self.state.successful_build_edit_this_visit:
+            reason = "이번 방문의 건물 편집 기회를 이미 사용했습니다."
+        elif limit is not None and same_type_count >= limit:
+            reason = f"{building_type} 건물은 지역당 하나만 허용됩니다."
+        elif player.cash_won < 0 or player.cash_won < price:
+            reason = "건설비가 부족합니다."
+        descriptions = {
+            "residential": ("현재 시세를 자산으로 보유 · 방문료와 바퀴 수익 없음", "일반 매각 시 현재 시세 즉시 지급"),
+            "commercial": ("다른 플레이어 방문 시 방문료 수익", "일반 매각 시 다음 출발지에 시세 50% 환급"),
+            "industrial": ("출발지 도달 시 산업 수익 또는 손실 · 방문료 없음", "일반 매각 정산가 0원"),
+            "mixed_use": ("상업 방문료와 산업 기반 바퀴 수익", "최종 정산가는 공식 결정 대기"),
+        }
+        income_description, sale_description = descriptions[building_type]
+        return {
+            "game_instance_id": self.state.game_instance_id,
+            "state_version": self.state.state_version,
+            "player_id": player.id,
+            "region_id": region_id,
+            "region_name": region["name"],
+            "building_type": building_type,
+            "building_type_name": {"residential": "주거", "commercial": "상업", "industrial": "산업", "mixed_use": "복합"}[building_type],
+            "land_owned": self.state.land_ownership.get(region_id) == player.id,
+            "land_owner_id": self.state.land_ownership.get(region_id),
+            "price_won": price,
+            "current_cash_won": player.cash_won,
+            "cash_after_won": player.cash_won - price,
+            "allowed": not reason,
+            "reason": reason,
+            "tax_base_add_bps": int(self.rules["constants"]["building_tax_bps"][building_type]),
+            "income_description": income_description,
+            "sale_description": sale_description,
+            "same_type_count": same_type_count,
+            "limit": limit,
+            "edit_action_consumed_on_success": True,
+        }
+
+    def validate_build_confirmation(self, player_id, payload):
+        if payload.get("game_instance_id") != self.state.game_instance_id:
+            raise GameRuleError("게임 상태가 변경되어 건설 조건을 다시 확인해야 합니다.")
+        if payload.get("state_version") != self.state.state_version:
+            raise GameRuleError("게임 상태가 변경되어 건설 조건을 다시 확인해야 합니다.")
+        preview = self.build_preview(player_id, payload.get("region_id"), payload.get("building_type"))
+        if payload.get("preview_price_won") != preview["price_won"] or not preview["allowed"]:
+            raise GameRuleError(preview["reason"] or "게임 상태가 변경되어 건설 조건을 다시 확인해야 합니다.")
+        return preview
 
     def sell_building(self, player_id, building_id):
         player = self._require_current_player(player_id)
@@ -512,6 +787,35 @@ class GameEngine:
         self._record_activity(player)
         return {"player_id": player.id, "recorded": True}
 
+    def acknowledge_events(self, player_id, event_version, occurrence_id=None):
+        player = self._find_player(player_id)
+        if not player:
+            raise GameRuleError("player not found")
+        try:
+            event_version = int(event_version)
+        except (TypeError, ValueError) as exc:
+            raise GameRuleError("event_version must be an integer") from exc
+        current = len(self.state.event_history)
+        visible = self._visible_event_occurrences(player)
+        acknowledged = self.state.event_acknowledged_occurrences.setdefault(player_id, set())
+        if occurrence_id is None:
+            occurrence_id = next(
+                (item["occurrence_id"] for item in reversed(visible) if item["occurrence_id"] not in acknowledged),
+                None,
+            )
+        occurrence = next((item for item in visible if item["occurrence_id"] == occurrence_id), None)
+        occurrence_version = occurrence.get("event_version", current) if occurrence else current
+        if not occurrence or event_version < occurrence_version or event_version > current or occurrence_id in acknowledged:
+            raise GameRuleError("no new event to acknowledge")
+        acknowledged.add(occurrence_id)
+        self.state.event_ack_versions[player_id] = event_version
+        return {
+            "player_id": player.id,
+            "recorded": True,
+            "event_version": event_version,
+            "occurrence_id": occurrence_id,
+        }
+
     def respond_land_takeover(self, player_id, accept):
         pending = self.state.pending_land_takeover
         if not pending:
@@ -609,8 +913,10 @@ class GameEngine:
             raise GameRuleError("personal event requires player")
         if event["scope"] == "regional" and not region_id:
             region_id = self._first_region_id()
+        occurrence_id = new_id("event_occ")
         active = {
             "id": event["id"],
+            "occurrence_id": occurrence_id,
             "scope": event["scope"],
             "player_id": player.id if player else None,
             "region_id": region_id,
@@ -619,9 +925,31 @@ class GameEngine:
             "recovery_rounds": int(event["recovery_rounds"]),
             "age_rounds": 0,
             "source": source,
+            "triggered_round": self.state.global_round,
+            "triggered_by_player_id": player.id if player else None,
         }
         self.state.active_events.append(active)
-        self.state.event_history.append({"id": event["id"], "round": self.state.global_round, "source": source})
+        self.state.event_history.append({
+            "id": event["id"],
+            "event_id": event["id"],
+            "occurrence_id": occurrence_id,
+            "title": event["title"],
+            "public_description": event["public_description"],
+            "private_description": event["private_description"],
+            "scope": event["scope"],
+            "player_id": player.id if player and event["scope"] == "personal" else None,
+            "region_id": region_id if event["scope"] == "regional" else None,
+            "effects": deepcopy(event["effects"]),
+            "effect_summary": self._event_effect_summary(event["effects"]),
+            "maximum_effect_summary": self._event_effect_summary(event["effects"]),
+            "duration_rounds": int(event["duration_rounds"]),
+            "recovery_rounds": int(event["recovery_rounds"]),
+            "round": self.state.global_round,
+            "triggered_round": self.state.global_round,
+            "triggered_by_player_id": player.id if player else None,
+            "event_version": len(self.state.event_history) + 1,
+            "source": source,
+        })
         self._log("event", "event_triggered", {"event_id": event["id"], "source": source, "player_id": player.id if player else None, "region_id": region_id})
         if player:
             self._build_personal_report(player)
@@ -698,6 +1026,7 @@ class GameEngine:
             for building in sim.state.buildings:
                 building_counts[building["building_type"]] += 1
         result = {
+            "game_instance_id": self.state.game_instance_id,
             "strategy_win_rates": {k: v["wins"] / v["games"] for k, v in strategy_stats.items()},
             "average_first_bankruptcy_round": sum(first_bankruptcy_rounds) / len(first_bankruptcy_rounds) if first_bankruptcy_rounds else None,
             "average_final_asset": sum(final_assets) / len(final_assets) if final_assets else 0,
@@ -1104,6 +1433,8 @@ class GameEngine:
     def public_state(self):
         config = self.state.config
         return {
+            "game_instance_id": self.state.game_instance_id,
+            "state_version": self.state.state_version,
             "rules_version": self.rules["rules_version"],
             "phase": self.ui_phase(),
             "engine_phase": self.state.phase,
@@ -1114,6 +1445,7 @@ class GameEngine:
             "current_turn_player_id": self.current_player().id if self.current_player() else None,
             "turn_has_rolled": self.state.turn_has_rolled,
             "last_dice": self.state.last_dice,
+            "last_roll": deepcopy(self.state.last_roll),
             "last_activity_player_id": self.state.last_activity_player_id,
             "elapsed_turn_seconds": round(self.elapsed_turn_seconds(), 3),
             "pending_action": self.state.pending_action,
@@ -1127,6 +1459,7 @@ class GameEngine:
             "usage_change_request": deepcopy(self.state.usage_change_request),
             "active_events": deepcopy(self.state.active_events),
             "event_history": list(self.state.event_history),
+            "event_version": len(self.state.event_history),
             "bankruptcy_records": deepcopy(self.state.bankruptcy_records),
             "bankruptcy_order": list(self.state.bankruptcy_order),
             "revival_counts": dict(self.state.revival_counts),
@@ -1212,8 +1545,76 @@ class GameEngine:
         state["regions"] = deepcopy(self.data["regions"])
         state["special_regions"] = deepcopy(self.data["special_regions"])
         state["special_region_details"] = self._special_region_details()
+        state["active_events"] = [self._public_event_occurrence(event) for event in self.state.active_events]
+        state["event_history"] = [self._public_event_occurrence(event) for event in self.state.event_history]
         state["rules_decisions_pending"] = deepcopy(self.rules["unresolved"])
         return state
+
+    def _event_definition(self, event_id):
+        return next((event for event in self.data["events"] if event["id"] == event_id), None)
+
+    def _event_effect_summary(self, effects):
+        labels = {
+            "commercial_visit_rate": "상업 방문료율",
+            "building_market_value": "건물 시세",
+            "cumulative_tax_rate": "누적세율",
+            "industrial_return_rate": "산업 수익률",
+            "regional_economy": "지역 경제",
+            "trade_balance": "무역수지",
+            "economic_growth": "경제성장률",
+            "building_tax_rate": "건물 기본세율",
+            "industry_cycle": "산업 경기",
+        }
+        operations = {"multiply": "배율", "add_bps": "증감", "set_bps": "설정"}
+        return [
+            f"{labels.get(effect['target'], effect['target'])}: {operations.get(effect['operation'], effect['operation'])} {int(effect['value_bps']) / 100:g}%"
+            for effect in effects
+        ]
+
+    def _public_event_occurrence(self, occurrence):
+        event_id = occurrence.get("event_id") or occurrence.get("id")
+        definition = self._event_definition(event_id) or {}
+        scope = occurrence.get("scope", definition.get("scope"))
+        base = {
+            "event_id": event_id,
+            "occurrence_id": occurrence.get("occurrence_id"),
+            "title": occurrence.get("title", definition.get("title")),
+            "scope": scope,
+            "public_description": occurrence.get("public_description", definition.get("public_description")),
+            "region_id": occurrence.get("region_id") if scope == "regional" else None,
+            "duration_rounds": occurrence.get("duration_rounds", definition.get("duration_rounds")),
+            "recovery_rounds": occurrence.get("recovery_rounds", definition.get("recovery_rounds")),
+            "triggered_round": occurrence.get("triggered_round", occurrence.get("round")),
+            "source": occurrence.get("source"),
+        }
+        if scope != "personal":
+            effects = occurrence.get("effects", definition.get("effects", []))
+            base["effect_summary"] = occurrence.get("effect_summary") or self._event_effect_summary(effects)
+        return base
+
+    def _visible_event_occurrences(self, player):
+        visible = []
+        for occurrence in self.state.event_history:
+            if occurrence.get("scope") == "personal" and occurrence.get("player_id") != player.id:
+                continue
+            item = deepcopy(occurrence)
+            item["description"] = occurrence.get("private_description") or occurrence.get("public_description")
+            if occurrence.get("scope") == "personal":
+                item["target_name"] = player.nickname
+            elif occurrence.get("scope") == "regional":
+                item["target_name"] = self.region_by_id(occurrence["region_id"])["name"]
+            else:
+                item["target_name"] = "전체 플레이어"
+            visible.append(item)
+        return visible
+
+    def _private_economic_action(self, action, player_id):
+        visible = deepcopy(action)
+        for change in visible.get("cash_changes", []):
+            if change.get("player_id") != player_id:
+                change.pop("cash_before_won", None)
+                change.pop("cash_after_won", None)
+        return visible
 
     def _special_region_details(self):
         details = {}
@@ -1275,6 +1676,8 @@ class GameEngine:
                 "response_rule": "auto_reject",
             }
         return {
+            "game_instance_id": self.state.game_instance_id,
+            "state_version": self.state.state_version,
             "player": player.public(),
             "pending_action": deepcopy(self.state.pending_action)
             if self.state.pending_action and self.state.pending_action.get("player_id") == player.id
@@ -1299,6 +1702,17 @@ class GameEngine:
                 for event in self.state.active_events
                 if event.get("player_id") in {None, player.id}
             ],
+            "event_ack_version": self.state.event_ack_versions.get(player.id, 0),
+            "pending_event_occurrences": [
+                occurrence
+                for occurrence in self._visible_event_occurrences(player)
+                if occurrence["occurrence_id"] not in self.state.event_acknowledged_occurrences.get(player.id, set())
+            ],
+            "economic_actions": [
+                self._private_economic_action(action, player.id)
+                for action in self.state.economic_actions
+                if player.id == action.get("actor_player_id") or player.id in action.get("related_player_ids", [])
+            ][-50:],
         }
 
     def _turn_remaining_seconds(self):
@@ -1600,6 +2014,8 @@ class GameEngine:
         rankings = self._rank_players(totals, log_dice=True)
         self.state.rankings.update(rankings)
         self.state.final_results = {
+            "game_instance_id": self.state.game_instance_id,
+            "state_version": self.state.state_version,
             "reason": reason,
             "global_round": self.state.global_round,
             "assets": totals,
@@ -1623,9 +2039,9 @@ class GameEngine:
                 lines.append(",".join(str(row[key]) for key in ("player_id", "nickname", "status", "total_asset_won", "rank")))
             return {"filename": "results.csv", "content_type": "text/csv", "body": "\n".join(lines)}
         if kind == "log":
-            return {"log": list(self.state.game_log)}
+            return {"game_instance_id": self.state.game_instance_id, "log": list(self.state.game_log)}
         if kind == "asset-history":
-            return {"asset_history": deepcopy(self.state.asset_history)}
+            return {"game_instance_id": self.state.game_instance_id, "asset_history": deepcopy(self.state.asset_history)}
         if kind == "bot-strategies":
             summary = {}
             for player in self.state.players:
@@ -1637,7 +2053,7 @@ class GameEngine:
                             "rank": result["rankings"].get(player.id),
                         }
                     )
-            return {"bot_strategies": summary}
+            return {"game_instance_id": self.state.game_instance_id, "bot_strategies": summary}
         raise GameRuleError("unsupported export kind")
 
     def configure_quick_game(self, preset="custom", custom=None, pause_at_round=None):
@@ -1686,7 +2102,30 @@ class GameEngine:
                 raise GameRuleError(f"bot_strategies[{index}] is not allowed")
 
     def _sync_lobby_bots(self):
-        existing_humans = [p for p in self.state.players if not p.is_bot and p.status != "exited"]
+        existing_humans = [
+            player
+            for player in self.state.players
+            if not player.is_bot
+            and player.status != "exited"
+            and player.slot_index < self.state.config.total_slots
+            and self.state.config.slot_types[player.slot_index] == "human"
+        ]
+        retained_ids = {player.id for player in existing_humans}
+        self.state.reconnect_token_hashes = {
+            player_id: token_hash
+            for player_id, token_hash in self.state.reconnect_token_hashes.items()
+            if player_id in retained_ids
+        }
+        self.state.event_ack_versions = {
+            player_id: version
+            for player_id, version in self.state.event_ack_versions.items()
+            if player_id in retained_ids
+        }
+        self.state.event_acknowledged_occurrences = {
+            player_id: occurrences
+            for player_id, occurrences in self.state.event_acknowledged_occurrences.items()
+            if player_id in retained_ids
+        }
         self.state.players = existing_humans
         bot_order = 0
         for slot, slot_type in enumerate(self.state.config.slot_types):
@@ -1804,6 +2243,11 @@ class GameEngine:
         if start != 0 and target >= BOARD_SIZE:
             return 0
         return target % BOARD_SIZE
+
+    def _movement_path(self, start, dice, destination):
+        if start != 0 and destination == 0:
+            return list(range(start + 1, BOARD_SIZE)) + [0]
+        return [((start + step) % BOARD_SIZE) for step in range(1, int(dice) + 1)]
 
     def _turn_timed_out(self):
         limit = self.state.config.turn_limit_seconds

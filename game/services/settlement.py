@@ -6,7 +6,7 @@ class SettlementService:
         self.engine = engine
 
     def key(self, player):
-        return f"{player.id}:{self.engine.state.turn_sequence}"
+        return f"{self.engine.state.game_instance_id}:{player.id}:{self.engine.state.turn_sequence}"
 
     def cached(self, player):
         result = self.engine.state.settlement_results.get(self.key(player))

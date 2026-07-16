@@ -16,6 +16,9 @@ let configLoaded = false;
 let configDirty = false;
 let hostPollTimer = null;
 let requestInFlight = false;
+let hostRefreshInFlight = false;
+let hostRefreshController = null;
+let renderedHostStateVersion = -1;
 let currentState = null;
 let savedConfig = null;
 
@@ -78,11 +81,11 @@ function cellName(cell) {
   return cell?.name || cell?.region_id || cell?.special_region_id || cell?.type || "";
 }
 
-async function getHostState() {
+async function getHostState(signal) {
   const url = "/api/host/state";
   let response;
   try {
-    response = await fetch("/api/host/state");
+    response = await fetch("/api/host/state", { signal });
   } catch (error) {
     console.error("Host state request failed", { url, error });
     setServerReachability(false);
@@ -364,24 +367,35 @@ function renderBotMetrics(result) {
 }
 
 async function refresh(forceConfig = false) {
-  const state = await getHostState();
-  if (state.error) throw new Error(state.error);
-  currentState = state;
-  if (forceConfig) configDirty = false;
-  const renderStep = (name, operation) => {
-    try { operation(); }
-    catch (error) {
-      console.error(`Host render step failed: ${name}`, error);
-      if (name === "board") setBoardStatus("보드 렌더링 중 오류가 발생했습니다.", "error");
-      else showError(`${name} 영역을 표시하지 못했습니다`);
-    }
-  };
-  renderStep("config", () => renderConfig(state.config));
-  renderStep("board", () => renderHostBoard(state));
-  renderStep("game status", () => renderPublicPanels(state));
-  renderStep("controls", () => updateControlsForPhase(state));
-  renderStep("log", () => renderLog(state));
-  renderStep("simulation", () => renderBotMetrics(state.simulation_results));
+  if (hostRefreshInFlight) return;
+  hostRefreshInFlight = true;
+  hostRefreshController = new AbortController();
+  try {
+    const state = await getHostState(hostRefreshController.signal);
+    if (state.error) throw new Error(state.error);
+    window.currentGameInstanceId = state.game_instance_id;
+    currentState = state;
+    if (state.state_version === renderedHostStateVersion && !forceConfig) return;
+    if (forceConfig) configDirty = false;
+    const renderStep = (name, operation) => {
+      try { operation(); }
+      catch (error) {
+        console.error(`Host render step failed: ${name}`, error);
+        if (name === "board") setBoardStatus("보드 렌더링 중 오류가 발생했습니다.", "error");
+        else showError(`${name} 영역을 표시하지 못했습니다`);
+      }
+    };
+    renderStep("config", () => renderConfig(state.config));
+    renderStep("board", () => renderHostBoard(state));
+    renderStep("game status", () => renderPublicPanels(state));
+    renderStep("controls", () => updateControlsForPhase(state));
+    renderStep("log", () => renderLog(state));
+    renderStep("simulation", () => renderBotMetrics(state.simulation_results));
+    renderedHostStateVersion = state.state_version;
+  } finally {
+    hostRefreshInFlight = false;
+    hostRefreshController = null;
+  }
 }
 
 document.querySelector("#viewResults").addEventListener("click", () => {

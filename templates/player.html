@@ -67,12 +67,66 @@
             <button id="manageAction">관리</button>
             <button id="tradeAction">거래</button>
             <button id="reviveAction">부활</button>
+            <label class="animation-setting">화면 연출
+              <select id="animationPreference">
+                <option value="full">기본</option>
+                <option value="fast">빠르게</option>
+                <option value="minimal">최소화</option>
+              </select>
+            </label>
+            <label class="sound-setting"><input id="animationMuted" type="checkbox" checked> 음소거</label>
           </div>
           <div id="actionMessage" class="action-message" role="status"></div>
         </aside>
       </section>
 
       <div id="tradeModal" class="trade-modal" hidden></div>
+
+      <div id="buildConfirmModal" class="confirm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="buildConfirmTitle">
+        <section class="confirm-card">
+          <h2 id="buildConfirmTitle">건물을 건설할까요?</h2>
+          <div id="buildConfirmDetails"></div>
+          <p id="buildConfirmError" class="action-message error" role="alert"></p>
+          <div class="confirm-actions">
+            <button id="cancelBuildConfirm" type="button">취소</button>
+            <button id="confirmBuild" type="button" class="primary-action">건설 확정</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="animationOverlay" class="animation-overlay" hidden>
+        <section id="diceStage" class="animation-stage dice-stage" hidden aria-live="polite" aria-label="주사위 결과">
+          <div id="diceFace" class="dice-face" data-face="1" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <strong id="diceResultText">주사위를 굴리는 중…</strong>
+          <button id="skipAnimation" type="button">애니메이션 건너뛰기</button>
+        </section>
+        <section id="eventReveal" class="animation-stage event-reveal" hidden role="dialog" aria-modal="true" aria-labelledby="eventRevealTitle">
+          <article id="eventRevealCard" class="event-reveal-card">
+            <div class="event-card-back" aria-hidden="true">EVENT</div>
+            <div class="event-card-front">
+              <span id="eventRevealScope"></span>
+              <h2 id="eventRevealTitle"></h2>
+              <p id="eventRevealDescription"></p>
+              <dl id="eventRevealDetails"></dl>
+              <ul id="eventRevealEffects"></ul>
+              <p class="rule-pending-notice">이벤트 카드 공식 승인 결정 대기</p>
+            </div>
+          </article>
+          <div class="event-reveal-actions">
+            <button id="skipEventReveal" type="button">공개 연출 건너뛰기</button>
+            <button id="confirmEvent" type="button" class="primary-action">확인</button>
+          </div>
+        </section>
+        <section id="economicStage" class="animation-stage economic-stage" hidden aria-live="polite" aria-label="경제 활동 결과">
+          <div id="economicIcon" class="economic-icon" aria-hidden="true"></div>
+          <strong id="economicAmount"></strong>
+          <span id="economicReason"></span>
+          <span id="economicTransfer"></span>
+          <button id="skipEconomicAnimation" type="button">전체 건너뛰기</button>
+        </section>
+      </div>
     </main>
 
     <script src="{{ url_for('static', filename='js/common.js') }}"></script>

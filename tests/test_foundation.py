@@ -50,7 +50,7 @@ def test_host_login_attempts_are_rate_limited():
 
 def test_host_client_does_not_poll_state_before_authentication_or_mix_origins():
     source = (Path(__file__).parents[1] / "static" / "js" / "host.js").read_text()
-    assert 'fetch("/api/host/state")' in source
+    assert 'fetch("/api/host/state", { signal })' in source
     assert "http://localhost" not in source
     assert "http://127.0.0.1" not in source
     assert "setInterval(() => refresh" not in source
@@ -91,6 +91,8 @@ def test_all_templates_render_and_dynamic_routes_are_registered():
     assert client.get("/player").status_code == 200
     rules = {rule.rule for rule in app.url_map.iter_rules()}
     assert "/api/player/<player_id>/private" in rules
+    assert "/api/player/<player_id>/state" in rules
+    assert "/api/player/reconnect" in rules
     assert "/api/report/<player_id>" in rules
     assert "/api/export/<kind>" in rules
 
@@ -250,6 +252,15 @@ def test_reset_restores_defaults_and_duplicate_transition_keys_reuse_result():
 
     config = {"total_slots": 2, "slot_types": ["bot", "bot"], "total_rounds": 10}
     post_host("/api/config", config, "config")
+    game_instance_id = client.get("/api/host/state").get_json()["game_instance_id"]
+
+    def post_host(path, body=None, key="same"):
+        return client.post(path, json=body or {}, headers={
+            **headers,
+            "Idempotency-Key": key,
+            "X-Game-Instance-Id": game_instance_id,
+        })
+
     first_start = post_host("/api/start", key="start-once").get_json()
     second_start = post_host("/api/start", key="start-once").get_json()
     assert first_start == second_start

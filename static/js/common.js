@@ -7,11 +7,13 @@ function idempotencyKey() {
 
 async function postJson(url, body) {
   const csrfToken = window.hostCsrfToken || sessionStorage.getItem("hostCsrfToken");
+  const gameInstanceId = window.currentGameInstanceId || window.localStorage.getItem("tour_game_instance_id");
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Idempotency-Key": idempotencyKey(),
+      ...(gameInstanceId ? { "X-Game-Instance-Id": gameInstanceId } : {}),
       ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {})
     },
     body: JSON.stringify(body || {})

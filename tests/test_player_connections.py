@@ -66,6 +66,11 @@ def test_player_javascript_connects_every_existing_player_mutation_and_deduplica
     assert "토지 구매는 건물 행동을 소비하지 않습니다." in source
     assert "토지 구매 포기" in source
     assert "이번 방문 건설하지 않기" in source
+    assert "boardGrid.innerHTML = \"\"" not in source
+    assert "new AbortController()" in source
+    assert "scheduleRefresh" in source
+    assert "/api/player/${encodeURIComponent(playerId)}/state" in source
+    assert "/api/player/reconnect" in source
 
 
 def test_private_state_has_server_allowed_actions_and_complete_asset_details():

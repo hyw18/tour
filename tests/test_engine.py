@@ -150,7 +150,10 @@ def test_turn_server_dice_forced_start_stop_and_round_increment():
     engine.start_game()
     engine.set_forced_dice(6)
     result = engine.roll_dice(a["id"])
-    assert result == {"dice": 6, "position": 6}
+    assert result["dice"] == 6
+    assert result["position"] == result["to_position"] == 6
+    assert result["from_position"] == 0
+    assert result["movement_path"] == [1, 2, 3, 4, 5, 6]
     assert engine.state.pending_action["type"] == "purchase_land"
     with pytest.raises(GameRuleError, match="already"):
         engine.roll_dice(a["id"])

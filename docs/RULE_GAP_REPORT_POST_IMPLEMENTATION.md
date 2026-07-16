@@ -1,49 +1,36 @@
-# 공식 규칙 차이 수정 후 보고서
+# 최신 HEAD 안정화 후 검증 보고서
 
-기준 브랜치: `main`  
-공식 규칙 버전: `2026.07.15.1`  
-수정일: 2026-07-15
+- 분석 기준 HEAD: `dbf54825042eb60dfa877c7461762718024e9118`
+- 검증일: 2026-07-16
+- 공식 규칙 버전: `2026.07.16.1`
 
-## 분류 변화
+## 검증 상태
 
-| 분류 | 수정 전 | 수정 후 |
-|---|---:|---:|
-| MATCH | 78 | 101 |
-| PARTIAL | 10 | 0 |
-| MISSING | 4 | 0 |
-| CONFLICT | 9 | 0 |
-| UNRESOLVED | 3 | 3 |
-| 합계 | 104 | 104 |
+| 기능 | 상태 | 근거 |
+|---|---|---|
+| 모든 게임 상태 변경 API 멱등 키 필수 | MULTI_CLIENT_TESTED | 누락 400, payload 충돌 409, 게임 인스턴스 범위 테스트 |
+| 100회 동시 주사위·구매·건설·거래 수락 | MULTI_CLIENT_TESTED | 각 상태 변경 1회 |
+| 세션 쿠키 손실 후 캐릭터 복구 | MULTI_CLIENT_TESTED | 별도 Flask 세션에서 위치·토지 유지 확인 |
+| 공개·개인 동일 revision | MULTI_CLIENT_TESTED | 잠금 내 통합 `/api/player/<id>/state` |
+| 실패·위조·중복 활동 제외 | MULTI_CLIENT_TESTED | no-action 카운터 불변 확인 |
+| 이벤트 확인 1회 | MULTI_CLIENT_TESTED | event_version 재확인·재전송 차단 |
+| 4개 세션 30라운드 | MULTI_CLIENT_TESTED | 120턴, 서버 500 없음 |
+| 부분 보드 갱신·적응형 폴링 | UNIT_TESTED | 정적 연결 및 JavaScript 문법 컴파일 |
+| Chromium 실제 동작 | MANUAL_DEVICE_TEST_REQUIRED | 시스템 라이브러리 `libnspr4.so` 부재 |
 
-## 수정 완료 규칙
+## 실행 결과
 
-- CONFLICT: PAUSE-001, LOAN-003, SPECIAL-002, SPECIAL-003, RIGHTS-001,
-  TRADE-002, EVENT-006, BANKRUPTCY-004, REVIVE-002
-- PARTIAL: MONEY-002, RETURN-003, LOAN-005, USAGE-002, TRADE-003,
-  EVENT-002, BANKRUPTCY-003, EXIT-003, RANK-002, PRIV-001
-- MISSING: SETTLE-003, EVENT-008, EVENT-009, PRIV-003
+- 전체 pytest: `172 passed, 1 skipped`
+- Ruff: 통과
+- Python compileall: 통과
+- QuickJS 문법 컴파일: `common.js`, `host.js`, `player.js` 통과
+- 4봇 일반 300라운드 설정: 공식 조기 종료 조건으로 244라운드 종료, 오류 없음
+- 4봇 빠른 300라운드: 20회 완료
+- 일시중지·재개: 100회 완료
+- 새 게임 상태 교체: 20회 완료, 멱등 키와 재접속 해시 잔류 없음
 
-## 핵심 구현 근거
+## 계속 남는 항목
 
-- 요청 타이머는 일시중지 기간만큼 기준시각을 보정하며 승인자별 시각을 유지한다.
-- 대출은 세 번째 출발지에서 `remaining_due_won > 0`이면 즉시 파산하고 실제 현금
-  입금은 `LoanService.deposit`을 통해 원장 기록과 자동상환을 한 번씩 수행한다.
-- 특수지역은 누적 현재가로 구매하고 강제매각 후에도 누적가를 유지한다.
-- `RightsService`가 모든 체인의 시작점·중복·존재 여부를 검증한다.
-- 권리 통합 토지 거래는 명목 소유자를 제외한 외부 권리자를 분석한다.
-- 이벤트 배율은 `Fraction`으로 합성하고 최종 금액에서만 50,000원 반올림한다.
-- explicit override는 활성 이벤트 효과에서 매 계산 시 판정하므로 종료 즉시 사라진다.
-- 파산 인수는 체인 스냅샷으로 `D→B→C`를 복구하고 플레이어 API/UI 응답을 제공한다.
-- 출발지 정산은 플레이어와 turn sequence 키로 결과를 캐시하고 전역 상태 잠금 안에서 실행한다.
-- 이벤트 참조와 연쇄 그래프를 데이터 로드 시 검증한다.
-- 사용자 활동은 상태 변경 API 공통 경계에서 기록한다.
-- 동점은 서버 seed 기반 주사위를 동점 해소까지 반복하며 모든 결과를 게임 로그에 남긴다.
-- 공개·개인·거래 관계자·호스트 뷰를 분리하고 호스트 기본 뷰에는 금융 상세 없이 로그만 추가한다.
-
-## 계속 UNRESOLVED인 규칙
-
-- TAX-005: 미개발 토지세 0.5%p 유지 여부
-- EVENT-010: 현재 이벤트 카드 공식 승인 여부
-- ASSET-006: 복합 건물 최종 정산가 0원 확정 여부
-
-세 항목의 기존 동작은 변경하지 않았으며 호스트와 플레이어 화면에 결정 대기로 표시한다.
+- 실제 스마트폰 2~4대에서의 장시간 포커스·스크롤·회전 검증
+- Playwright 전체 시나리오와 브라우저 콘솔 오류 0 확인
+- UNRESOLVED: TAX-005, EVENT-010, ASSET-006

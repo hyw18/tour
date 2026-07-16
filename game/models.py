@@ -83,6 +83,8 @@ class HostConfig:
 
 @dataclass
 class GameState:
+    game_instance_id: str = field(default_factory=lambda: uuid4().hex)
+    state_version: int = 0
     config: HostConfig = field(default_factory=HostConfig)
     players: list[Player] = field(default_factory=list)
     phase: str = "lobby"
@@ -96,8 +98,13 @@ class GameState:
     turn_has_rolled: bool = False
     turn_sequence: int = 0
     last_dice: int | None = None
+    last_roll: dict | None = None
+    economic_actions: list = field(default_factory=list)
     last_activity_player_id: str | None = None
     processed_keys: dict[str, dict] = field(default_factory=dict)
+    reconnect_token_hashes: dict[str, str] = field(default_factory=dict)
+    event_ack_versions: dict[str, int] = field(default_factory=dict)
+    event_acknowledged_occurrences: dict[str, set[str]] = field(default_factory=dict)
     forced_dice_once: int | None = None
     bot_auto_enabled: bool = False
     land_ownership: dict = field(default_factory=dict)
@@ -159,8 +166,13 @@ class GameState:
         self.turn_has_rolled = False
         self.turn_sequence = 0
         self.last_dice = None
+        self.last_roll = None
+        self.economic_actions.clear()
         self.last_activity_player_id = None
         self.processed_keys.clear()
+        self.reconnect_token_hashes.clear()
+        self.event_ack_versions.clear()
+        self.event_acknowledged_occurrences.clear()
         self.forced_dice_once = None
         self.bot_auto_enabled = False
         self.land_ownership.clear()

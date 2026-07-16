@@ -19,6 +19,10 @@ class PhaseConflict(GameRuleError):
     pass
 
 
+class ResourceNotFound(GameRuleError):
+    pass
+
+
 def engine():
     return current_app.config["GAME_ENGINE"]
 
@@ -43,6 +47,25 @@ def json_error(message, status=400):
     return jsonify({"error": message}), status
 
 
+ECONOMIC_ACTION_TYPES = {
+    "/api/roll": "turn_economy",
+    "/api/purchase-land": "land_purchase",
+    "/api/build": "building_purchase",
+    "/api/sell-building": "building_sale",
+    "/api/purchase-special": "special_region_purchase",
+    "/api/trade/land/propose": "land_trade",
+    "/api/trade/land/respond": "land_trade",
+    "/api/operating-right/transfer/propose": "operating_right_trade",
+    "/api/operating-right/transfer/respond": "operating_right_trade",
+    "/api/usage-change/request": "usage_change",
+    "/api/usage-change/respond": "usage_change",
+    "/api/operating-right/recall": "operating_right_recall",
+    "/api/event/trigger": "event_cash_change",
+    "/api/bankruptcy/takeover/respond": "bankruptcy_refund",
+    "/api/revive": "revival",
+}
+
+
 def boolean_field(payload, name):
     value = payload.get(name)
     if not isinstance(value, bool):
@@ -50,20 +73,48 @@ def boolean_field(payload, name):
     return value
 
 
-def mutating_route(handler=None, *, allow_ended=False):
+def mutating_route(handler=None, *, allow_ended=False, bump_state=True, record_activity=True):
     def decorator(route_handler):
         @wraps(route_handler)
         def wrapper(*args, **kwargs):
             key = request.headers.get("Idempotency-Key")
             try:
-                scoped_key = f"{request.path}:{key}" if key else key
+                request_instance_id = request.headers.get("X-Game-Instance-Id")
+                scope_instance_id = request_instance_id or engine().state.game_instance_id
+                scoped_key = f"{scope_instance_id}:{request.path}:{key}" if key else key
                 payload = request.get_json(silent=True)
                 signature = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 def execute():
+                    if request_instance_id and request_instance_id != engine().state.game_instance_id:
+                        raise PhaseConflict("previous game instance has expired")
                     if engine().state.ended and not allow_ended:
                         raise PhaseConflict("current phase does not allow this action")
+                    action_type = ECONOMIC_ACTION_TYPES.get(request.path)
+                    before = engine().economic_snapshot() if action_type else None
+                    pending_before = dict(engine().state.pending_action or {})
                     result = route_handler(*args, **kwargs)
-                    record_authenticated_activity(payload)
+                    if record_activity:
+                        record_authenticated_activity(payload)
+                    economic_action = None
+                    if action_type:
+                        actor_player_id = None
+                        if isinstance(payload, dict):
+                            actor_player_id = payload.get("player_id") or payload.get("requester_id") or payload.get("responder_id") or payload.get("approver_id")
+                        context = {
+                            "region_id": (payload or {}).get("region_id") or pending_before.get("region_id"),
+                            "special_region_id": pending_before.get("special_region_id"),
+                            "building_id": (payload or {}).get("building_id"),
+                            "building_type": (payload or {}).get("building_type"),
+                        }
+                        economic_action = engine().record_economic_action(action_type, actor_player_id, before, {key: value for key, value in context.items() if value is not None})
+                    if bump_state:
+                        engine().mark_state_changed()
+                    if isinstance(result, dict):
+                        result["game_instance_id"] = engine().state.game_instance_id
+                        result["state_version"] = engine().state.state_version
+                        if economic_action:
+                            economic_action["state_version"] = engine().state.state_version
+                            result["economic_action"] = economic_action
                     return result
 
                 return jsonify(engine().with_idempotency(scoped_key, execute, signature))
@@ -73,8 +124,9 @@ def mutating_route(handler=None, *, allow_ended=False):
                 return json_error(str(exc), 409)
             except IdempotencyConflict as exc:
                 return json_error(str(exc), 409)
+            except ResourceNotFound as exc:
+                return json_error(str(exc), 404)
             except GameRuleError as exc:
-                record_authenticated_activity(payload)
                 return json_error(str(exc))
 
         return wrapper
@@ -158,6 +210,27 @@ def api_player_private_state(player_id):
     return jsonify(engine().player_private_state(player_id))
 
 
+@bp.get("/api/player/<player_id>/state")
+def api_player_state(player_id):
+    require_player(player_id)
+    return jsonify(engine().run_serialized(lambda: {
+        "game_instance_id": engine().state.game_instance_id,
+        "state_version": engine().state.state_version,
+        "public": views().public(),
+        "private": engine().player_private_state(player_id),
+    }))
+
+
+@bp.get("/api/player/<player_id>/build-preview")
+def api_build_preview(player_id):
+    require_player(player_id)
+    return jsonify(engine().run_serialized(lambda: engine().build_preview(
+        player_id,
+        request.args.get("region_id"),
+        request.args.get("building_type"),
+    )))
+
+
 @bp.post("/api/config")
 @mutating_route
 def api_config():
@@ -177,7 +250,36 @@ def api_join():
         player_ids.append(player["id"])
     session["player_ids"] = player_ids
     session["player_id"] = player["id"]
-    return player
+    return {
+        **player,
+        "reconnect_token": engine().issue_reconnect_token(player["id"]),
+        "game_instance_id": engine().state.game_instance_id,
+    }
+
+
+@bp.post("/api/player/reconnect")
+@mutating_route(bump_state=False, record_activity=False, allow_ended=True)
+def api_player_reconnect():
+    payload = request.get_json(force=True, silent=True) or {}
+    if payload.get("game_instance_id") != engine().state.game_instance_id:
+        raise PhaseConflict("previous game instance has expired")
+    try:
+        player = engine().reconnect_player(
+            payload.get("player_id"),
+            payload.get("reconnect_token"),
+            payload.get("game_instance_id"),
+        )
+    except LookupError as exc:
+        raise ResourceNotFound(str(exc)) from exc
+    except PermissionError as exc:
+        raise PermissionDenied(str(exc)) from exc
+    current_ids = {item.id for item in engine().state.players}
+    player_ids = [item for item in session.get("player_ids", []) if item in current_ids]
+    if player["id"] not in player_ids:
+        player_ids.append(player["id"])
+    session["player_ids"] = player_ids
+    session["player_id"] = player["id"]
+    return {**player, "game_instance_id": engine().state.game_instance_id}
 
 
 @bp.post("/api/start")
@@ -275,6 +377,7 @@ def api_decline_action():
 def api_build():
     payload = request.get_json(force=True, silent=True) or {}
     require_player(payload.get("player_id"))
+    engine().validate_build_confirmation(payload.get("player_id"), payload)
     engine().build_on_land(payload.get("player_id"), payload.get("building_type"))
     return views().public()
 
@@ -380,7 +483,11 @@ def api_event_acknowledge():
     payload = request.get_json(force=True, silent=True) or {}
     player_id = payload.get("player_id")
     require_player(player_id)
-    return engine().record_player_activity(player_id)
+    return engine().acknowledge_events(
+        player_id,
+        payload.get("last_seen_event_version", payload.get("event_version")),
+        payload.get("occurrence_id"),
+    )
 
 
 @bp.post("/api/event/trigger")

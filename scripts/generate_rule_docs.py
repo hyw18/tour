@@ -164,22 +164,24 @@ def generate_matrix(data):
     lines = [
         "# 규칙 구현·테스트 대응표",
         "",
+        "분석 기준 HEAD: `dbf54825042eb60dfa877c7461762718024e9118`",
         f"기준 `rules_version`: `{data['rules_version']}`",
-        "판정 시점: 2026-07-16. 승인된 충돌·부분·누락 수정 후 코드와 테스트를 다시 대조한 결과다.",
+        "판정 시점: 2026-07-16. 최신 코드와 172개 통과 테스트를 다시 대조한 결과다.",
         "",
         "| MATCH | PARTIAL | MISSING | CONFLICT | UNRESOLVED | 합계 |",
         "|---:|---:|---:|---:|---:|---:|",
         f"| {counts['MATCH']} | {counts['PARTIAL']} | {counts['MISSING']} | {counts['CONFLICT']} | {counts['UNRESOLVED']} | {len(data['rules'])} |",
         "",
-        "| 규칙 ID | 판정 | 코드 근거 | 테스트 근거 | 차이·비고 |",
-        "|---|---|---|---|---|",
+        "| 규칙 ID | 판정 | 검증 상태 | 코드 근거 | 테스트 근거 | 차이·비고 |",
+        "|---|---|---|---|---|---|",
     ]
     for rule in data["rules"]:
         rule_id = rule["id"]
         prefix = rule_id.split("-", 1)[0]
         test = "—" if rule_id in NO_DIRECT_TEST else TEST_BY_PREFIX[prefix]
         note = "공식 요구와 현재 근거가 일치" if status(rule_id) == "MATCH" else NOTES.get(rule_id, "세부 범위가 일부만 구현·검증됨")
-        lines.append(f"| {rule_id} | {status(rule_id)} | {CODE_BY_PREFIX[prefix]} | {test} | {note} |")
+        verification = "UNRESOLVED" if status(rule_id) == "UNRESOLVED" else "UNIT_TESTED"
+        lines.append(f"| {rule_id} | {status(rule_id)} | {verification} | {CODE_BY_PREFIX[prefix]} | {test} | {note} |")
     lines += [
         "",
         "## 직접 테스트가 없는 규칙",
@@ -193,6 +195,7 @@ def generate_matrix(data):
         "- `MISSING`: 요구된 구현 또는 직접 검증이 없다.",
         "- `CONFLICT`: 현재 동작이 공식 규칙과 다르며 승인 전 자동 수정하지 않는다.",
         "- `UNRESOLVED`: 공식 결정을 위해 사용자 판단이 필요하다.",
+        "- `UNIT_TESTED`: 자동 단위·통합 테스트 근거가 있으나 실제 스마트폰 수동 검증을 뜻하지 않는다.",
         "",
     ]
     return "\n".join(lines)

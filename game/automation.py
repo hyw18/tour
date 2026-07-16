@@ -34,7 +34,13 @@ class AutomationWorker:
         self._thread = None
 
     def tick(self) -> None:
-        self.engine.run_serialized(lambda: self.engine.advance_automation(force=True))
+        def advance_and_version():
+            before = self.engine.automation_revision_marker()
+            self.engine.advance_automation(force=True)
+            if self.engine.automation_revision_marker() != before:
+                self.engine.mark_state_changed()
+
+        self.engine.run_serialized(advance_and_version)
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
