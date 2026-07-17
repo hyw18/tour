@@ -44,3 +44,10 @@ def test_result_summary_and_development_timeline_are_exposed():
     ):
         assert field in script
     assert "window.turnPerformanceLog" in script
+
+
+def test_observed_opponent_dice_animation_releases_presentation_lock():
+    script, _ = sources()
+    assert 'animationController.enqueue("dice", incomingRoll.action_id, async () => {' in script
+    assert "await playDiceSequence(incomingRoll);" in script
+    assert "finishPresentation(incomingRoll.action_id);" in script

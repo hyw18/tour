@@ -21,6 +21,8 @@ let pendingSnapshot = null;
 let observedStepTimeoutSequence = null;
 let observedRollActionId = null;
 const queuedOccurrenceIds = new Set();
+const displayingOccurrenceIds = new Set();
+const acknowledgedOccurrenceIds = new Set();
 const animationState = {
   type: null,
   sequenceId: null,
@@ -232,6 +234,25 @@ class AnimationSequenceController {
 }
 
 const animationController = new AnimationSequenceController();
+
+window.getTourDebugState = () => ({
+  actionInFlight,
+  animationState: { ...animationState },
+  turnPresentationState: { ...turnPresentationState },
+  animationController: {
+    processing: animationController.processing,
+    queueLength: animationController.queue.length,
+    hasCurrentCancel: Boolean(animationController.currentCancel),
+  },
+  pendingSnapshot,
+  renderedStateVersion,
+  lastPrivateTurnStep: lastPrivate?.turn_step || null,
+  rollDisabledReason: action("roll").allowed ? "" : action("roll").reason,
+  eventRevealHidden: eventReveal?.hidden,
+  queuedOccurrenceIds: [...queuedOccurrenceIds],
+  displayingOccurrenceIds: [...displayingOccurrenceIds],
+  acknowledgedOccurrenceIds: [...acknowledgedOccurrenceIds],
+});
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -543,62 +564,123 @@ function fillEventCard(occurrence) {
     .map((effect) => `<li>${escapeHtml(effect)}</li>`).join("");
 }
 
-async function revealEventOccurrence(occurrence) {
-  await postJson("/api/event/presentation/start", {
-    player_id: playerId, occurrence_id: occurrence.occurrence_id, stage: "animation"
-  }, { retryCount: 1 }).catch((error) => console.warn("Event animation timer exclusion unavailable", error));
-  showAnimationStage(eventReveal);
-  fillEventCard(occurrence);
-  eventReveal.classList.remove("is-revealed");
-  const urgent = lastPrivate?.turn_remaining_seconds != null && lastPrivate.turn_remaining_seconds <= 10;
-  await animationController.wait(urgent ? 0 : animationDuration(220, 80));
-  eventReveal.classList.add("is-revealed");
-  await postJson("/api/event/presentation/revealed", {
-    player_id: playerId, occurrence_id: occurrence.occurrence_id
-  }, { retryCount: 1 }).catch((error) => console.warn("Event animation timer resume unavailable", error));
-  await animationController.wait(urgent ? 0 : animationDuration(240, 80));
-  await new Promise((resolve) => {
-    const confirm = $("#confirmEvent");
-    const cancel = () => {
-      confirm.removeEventListener("click", handler);
-      resolve();
-    };
-    const handler = async () => {
-      confirm.disabled = true;
-      try {
-        await postJson("/api/event/presentation/start", {
-          player_id: playerId, occurrence_id: occurrence.occurrence_id, stage: "acknowledgement"
-        }, { retryCount: 1 }).catch((error) => console.warn("Event acknowledgement timer exclusion unavailable", error));
-        await postJson("/api/event/acknowledge", {
-          player_id: playerId,
-          occurrence_id: occurrence.occurrence_id,
-          last_seen_event_version: lastState.event_version
-        });
-        rememberOccurrence(occurrence.occurrence_id);
-        confirm.removeEventListener("click", handler);
-        animationController.currentCancel = null;
-        resolve();
-      } catch (error) {
-        showMessage(error.message || "이벤트 확인에 실패했습니다.", true);
-        confirm.disabled = false;
-      }
-    };
+function closeEventRevealImmediately(occurrenceId = null) {
+  const confirm = $("#confirmEvent");
+  if (confirm) {
+    confirm.onclick = null;
     confirm.disabled = false;
-    confirm.addEventListener("click", handler);
-    animationController.currentCancel = cancel;
-  });
+  }
   eventReveal.classList.remove("is-revealed");
+  eventReveal.hidden = true;
+  if (occurrenceId) {
+    queuedOccurrenceIds.delete(occurrenceId);
+    displayingOccurrenceIds.delete(occurrenceId);
+  }
+  if ([diceStage, eventReveal, economicStage, $("#resultSummary")].every((stage) => !stage || stage.hidden)) {
+    animationOverlay.hidden = true;
+  }
+  animationController.currentCancel = null;
+  finishPresentation(turnPresentationState.actionId || `event-${occurrenceId || "unknown"}`);
+}
+
+async function finishEventPresentationSafely(occurrence, exclusionToken, reason) {
+  if (!occurrence?.occurrence_id) return;
+  await postJson("/api/event/presentation/finish", {
+    player_id: playerId,
+    occurrence_id: occurrence.occurrence_id,
+    exclusion_token: exclusionToken,
+    reason
+  }, { retryCount: 1, timeoutMs: 10000 }).catch((error) => {
+    console.warn("Event presentation finish failed", error);
+  });
+}
+
+async function revealEventOccurrence(occurrence) {
+  let exclusionToken = null;
+  let completed = false;
+  displayingOccurrenceIds.add(occurrence.occurrence_id);
+  try {
+    const start = await postJson("/api/event/presentation/start", {
+      player_id: playerId, occurrence_id: occurrence.occurrence_id, stage: "animation"
+    }, { retryCount: 1, timeoutMs: 10000 }).catch((error) => {
+      console.warn("Event animation timer exclusion unavailable", error);
+      return null;
+    });
+    exclusionToken = start?.exclusion_token || start?.token || null;
+    showAnimationStage(eventReveal);
+    fillEventCard(occurrence);
+    eventReveal.classList.remove("is-revealed");
+    const urgent = lastPrivate?.turn_remaining_seconds != null && lastPrivate.turn_remaining_seconds <= 10;
+    await animationController.wait(urgent ? 0 : animationDuration(220, 80));
+    eventReveal.classList.add("is-revealed");
+    await postJson("/api/event/presentation/revealed", {
+      player_id: playerId, occurrence_id: occurrence.occurrence_id
+    }, { retryCount: 1, timeoutMs: 10000 }).catch((error) => console.warn("Event animation timer resume unavailable", error));
+    await animationController.wait(urgent ? 0 : animationDuration(240, 80));
+    await new Promise((resolve) => {
+      const confirm = $("#confirmEvent");
+      let requestInProgress = false;
+      const cancel = () => {
+        confirm.onclick = null;
+        resolve();
+      };
+      const handler = async () => {
+        if (requestInProgress || acknowledgedOccurrenceIds.has(occurrence.occurrence_id)) return;
+        requestInProgress = true;
+        confirm.disabled = true;
+        try {
+          const ackStart = await postJson("/api/event/presentation/start", {
+            player_id: playerId, occurrence_id: occurrence.occurrence_id, stage: "acknowledgement"
+          }, { retryCount: 1, timeoutMs: 10000 }).catch((error) => {
+            console.warn("Event acknowledgement timer exclusion unavailable", error);
+            return null;
+          });
+          exclusionToken = ackStart?.exclusion_token || ackStart?.token || exclusionToken;
+          await postJson("/api/event/acknowledge", {
+            player_id: playerId,
+            occurrence_id: occurrence.occurrence_id,
+            last_seen_event_version: lastState.event_version
+          }, { timeoutMs: 10000 });
+          rememberOccurrence(occurrence.occurrence_id);
+          acknowledgedOccurrenceIds.add(occurrence.occurrence_id);
+          confirm.onclick = null;
+          completed = true;
+          resolve();
+        } catch (error) {
+          showMessage(error.message || "이벤트 확인에 실패했습니다. 다시 시도하세요.", true);
+          confirm.disabled = false;
+          requestInProgress = false;
+        }
+      };
+      confirm.disabled = false;
+      confirm.onclick = handler;
+      animationController.currentCancel = cancel;
+    });
+  } finally {
+    await finishEventPresentationSafely(occurrence, exclusionToken, completed ? "acknowledged" : "cancelled");
+    closeEventRevealImmediately(occurrence.occurrence_id);
+    scheduleRefresh(true);
+  }
 }
 
 function enqueuePendingEvents(privateData) {
   if (turnPresentationState.inputLocked) return;
   const remembered = rememberedOccurrences().values;
   (privateData?.pending_event_occurrences || []).forEach((occurrence) => {
-    if (remembered.has(occurrence.occurrence_id) || queuedOccurrenceIds.has(occurrence.occurrence_id)) return;
+    if (
+      remembered.has(occurrence.occurrence_id)
+      || queuedOccurrenceIds.has(occurrence.occurrence_id)
+      || displayingOccurrenceIds.has(occurrence.occurrence_id)
+      || acknowledgedOccurrenceIds.has(occurrence.occurrence_id)
+    ) return;
     queuedOccurrenceIds.add(occurrence.occurrence_id);
     animationController.enqueue("event", occurrence.occurrence_id, async () => {
-      await revealEventOccurrence(occurrence);
-      queuedOccurrenceIds.delete(occurrence.occurrence_id);
+      try {
+        await revealEventOccurrence(occurrence);
+      } finally {
+        queuedOccurrenceIds.delete(occurrence.occurrence_id);
+        displayingOccurrenceIds.delete(occurrence.occurrence_id);
+      }
     });
   });
 }
@@ -893,18 +975,19 @@ function renderMeters(state, me, privateData) {
   topbarCash.textContent = `${money(privatePlayer.cash_won)}원`;
   roundStatus.textContent = `R${state.global_round} / ${state.config.total_rounds}`;
   turnTimer.className = "";
+  const stepLabel = userStepLabel(step?.step_id, step?.label);
   if (state.paused) {
     turnTimer.textContent = "일시중지";
     turnTimer.classList.add("timer-paused");
   } else if (step && !step.user_input_required) {
-    turnTimer.textContent = `${step.label} · 제한시간 정지${totalRemaining == null ? "" : ` · 전체 최대 ${Math.ceil(totalRemaining)}초`}`;
+    turnTimer.textContent = `${stepLabel} · 제한시간 정지${totalRemaining == null ? "" : ` · 전체 선택시간 ${Math.ceil(totalRemaining)}초`}`;
     turnTimer.classList.add("timer-paused");
   } else if (remaining == null) {
-    turnTimer.textContent = `${step?.label || "현재 단계"} · 시간 제한 없음`;
+    turnTimer.textContent = `${stepLabel || "현재 단계"} · 시간 제한 없음`;
   } else {
     const seconds = Math.max(0, Math.ceil(remaining));
     const owner = step?.player_id && step.player_id !== playerId ? `${current?.nickname || "다른 플레이어"} · ` : "";
-    turnTimer.textContent = `${owner}${step?.label || "현재 단계"} · ${seconds <= 5 ? "긴급 · " : seconds <= 10 ? "주의 · " : ""}${seconds}초${totalRemaining == null ? "" : ` · 전체 최대 ${Math.ceil(totalRemaining)}초`}`;
+    turnTimer.textContent = `${owner}${stepLabel || "현재 단계"} · ${seconds <= 5 ? "긴급 · " : seconds <= 10 ? "주의 · " : ""}${seconds}초${totalRemaining == null ? "" : ` · 전체 선택시간 ${Math.ceil(totalRemaining)}초`}`;
     if (seconds <= 5) turnTimer.classList.add("timer-critical");
     else if (seconds <= 10) turnTimer.classList.add("timer-warning");
   }
@@ -918,6 +1001,30 @@ function renderMeters(state, me, privateData) {
   }
 }
 
+function userStepLabel(stepId, fallback) {
+  return {
+    ROLL_DECISION: "주사위 선택",
+    ROLL_RESOLUTION: "이동",
+    ARRIVAL_PRESENTATION: "도착",
+    SETTLEMENT_PRESENTATION: "정산",
+    LAND_PURCHASE_DECISION: "토지 구매",
+    SPECIAL_PURCHASE_DECISION: "특수지역 구매",
+    BUILD_DECISION: "건물 건설",
+    BUILD_TYPE_SELECTION: "건물 건설",
+    BUILD_CONFIRMATION: "건물 건설",
+    MANAGEMENT_DECISION: "자산 관리",
+    TRADE_CONFIGURATION: "거래 작성",
+    TRADE_RESPONSE: "거래 응답",
+    USAGE_CHANGE_RESPONSE: "승인 응답",
+    EVENT_CONFIRMATION: "이벤트 확인",
+    RESULT_CONFIRMATION: "결과 요약",
+    TURN_END_DECISION: "턴 마무리",
+    TURN_COMPLETE: "완료",
+    BANKRUPTCY_TAKEOVER: "파산 인수",
+    REVIVAL_DECISION: "부활 선택",
+  }[stepId] || fallback || stepId;
+}
+
 function renderTurnStepIndicator(state) {
   const indicator = $("#turnStepIndicator");
   const current = state.turn_step;
@@ -929,22 +1036,33 @@ function renderTurnStepIndicator(state) {
   (state.turn_step_history || []).forEach((item) => {
     if (item.from_step && !completed.includes(item.from_step)) completed.push(item.from_step);
   });
-  const actual = [...completed, current.step_id];
-  if (!["TURN_END_DECISION", "TURN_COMPLETE"].includes(current.step_id)) actual.push("TURN_END_DECISION");
+  const actual = [...completed, current.step_id]
+    .map(groupTurnStep)
+    .filter((stepId, index, list) => stepId && list.indexOf(stepId) === index);
+  if (!["TURN_END_DECISION", "TURN_COMPLETE"].includes(groupTurnStep(current.step_id))) actual.push("TURN_END_DECISION");
   const labels = {
     ROLL_DECISION: "주사위", ROLL_RESOLUTION: "이동", ARRIVAL_PRESENTATION: "도착",
     SETTLEMENT_PRESENTATION: "정산", LAND_PURCHASE_DECISION: "구매 선택",
     SPECIAL_PURCHASE_DECISION: "특수지역 선택", BUILD_DECISION: "건설",
-    BUILD_TYPE_SELECTION: "유형 선택", BUILD_CONFIRMATION: "건설 확인",
+    BUILD_TYPE_SELECTION: "건설", BUILD_CONFIRMATION: "건설",
     MANAGEMENT_DECISION: "관리", TRADE_CONFIGURATION: "거래 작성",
     EVENT_CONFIRMATION: "이벤트", RESULT_CONFIRMATION: "결과", TURN_END_DECISION: "턴 종료",
     TURN_COMPLETE: "완료"
   };
   indicator.innerHTML = actual.map((stepId, index) => {
-    const isCurrent = stepId === current.step_id && index === actual.lastIndexOf(stepId);
-    const className = isCurrent ? "current" : index < actual.indexOf(current.step_id) ? "completed" : "upcoming";
+    const currentGroup = groupTurnStep(current.step_id);
+    const isCurrent = stepId === currentGroup && index === actual.lastIndexOf(stepId);
+    const className = isCurrent ? "current" : index < actual.indexOf(currentGroup) ? "completed" : "upcoming";
     return `<span class="${className}">${className === "completed" ? "✓ " : className === "current" ? "● " : ""}${escapeHtml(labels[stepId] || stepId)}</span>`;
   }).join("");
+}
+
+function groupTurnStep(stepId) {
+  if (["ROLL_RESOLUTION"].includes(stepId)) return "ROLL_RESOLUTION";
+  if (["ARRIVAL_PRESENTATION", "SETTLEMENT_PRESENTATION", "RESULT_CONFIRMATION"].includes(stepId)) return "ARRIVAL_PRESENTATION";
+  if (["LAND_PURCHASE_DECISION", "SPECIAL_PURCHASE_DECISION", "BUILD_DECISION", "BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION", "MANAGEMENT_DECISION", "TRADE_CONFIGURATION", "EVENT_CONFIRMATION"].includes(stepId)) return "MANAGEMENT_DECISION";
+  if (["TURN_END_DECISION", "TURN_COMPLETE"].includes(stepId)) return stepId;
+  return stepId;
 }
 
 function renderArrival(state, me, privateData) {
@@ -1389,12 +1507,15 @@ async function refreshPlayer() {
       animationController.cancel();
       pendingSnapshot = null;
       queuedOccurrenceIds.clear();
+      displayingOccurrenceIds.clear();
+      acknowledgedOccurrenceIds.clear();
       queuedEconomicActionIds.clear();
       economicActionsInitialized = false;
       buildConfirmModal.hidden = true;
       activeBuildPreview = null;
       rankingModal.hidden = true;
       financeModal.hidden = true;
+      closeEventRevealImmediately();
     } else if (animationState.playing || turnPresentationState.inputLocked) {
       pendingSnapshot = { public: state, private: privateData, state_version: state.state_version };
       return;
@@ -1405,7 +1526,13 @@ async function refreshPlayer() {
     } else if (incomingRoll?.action_id && incomingRoll.action_id !== observedRollActionId && lastState) {
       observedRollActionId = incomingRoll.action_id;
       pendingSnapshot = { public: state, private: privateData, state_version: state.state_version };
-      animationController.enqueue("dice", incomingRoll.action_id, () => playDiceSequence(incomingRoll));
+      animationController.enqueue("dice", incomingRoll.action_id, async () => {
+        try {
+          await playDiceSequence(incomingRoll);
+        } finally {
+          finishPresentation(incomingRoll.action_id);
+        }
+      });
       return;
     }
     const me = state.players.find((player) => player.id === playerId);
@@ -1663,10 +1790,6 @@ async function openBuildConfirmation() {
   buildConfirmationOrigin = build;
   try {
     if (["BUILD_DECISION", "MANAGEMENT_DECISION"].includes(lastPrivate?.turn_step?.step_id)) {
-      await postJson("/api/turn-step/build-phase", { player_id: playerId, step_id: "BUILD_TYPE_SELECTION" });
-      await syncPresentationSnapshot(lastPrivate?.current_arrival?.action_id || "build-selection");
-    }
-    if (lastPrivate?.turn_step?.step_id === "BUILD_TYPE_SELECTION") {
       await postJson("/api/turn-step/build-phase", { player_id: playerId, step_id: "BUILD_CONFIRMATION" });
       await syncPresentationSnapshot(lastPrivate?.current_arrival?.action_id || "build-confirmation");
     }

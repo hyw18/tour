@@ -33,10 +33,10 @@ def test_turn_starts_with_authoritative_roll_step_and_default_limits():
     engine, first, _ = started()
     step = engine.player_private_state(first["id"])["turn_step"]
     assert step["step_id"] == "ROLL_DECISION"
-    assert step["duration_seconds"] == 15
+    assert step["duration_seconds"] == 12
     assert step["user_input_required"] is True
     assert 0 < step["remaining_seconds"] <= 15
-    assert engine.turn_total_remaining_seconds() <= 120
+    assert engine.turn_total_remaining_seconds() <= 90
 
 
 def test_roll_resolution_stops_choice_clock_then_arrival_starts_fresh_purchase_clock():
@@ -49,7 +49,7 @@ def test_roll_resolution_stops_choice_clock_then_arrival_starts_fresh_purchase_c
     assert step["timeout_action"] == "decline_land_purchase"
 
 
-def test_purchase_result_is_automatic_then_build_gets_new_twenty_second_clock():
+def test_purchase_result_is_automatic_then_build_gets_single_build_clock():
     engine, first, _ = started()
     arrive_at_unowned_land(engine, first["id"])
     purchase_sequence = engine.state.turn_step["step_sequence"]
@@ -58,16 +58,15 @@ def test_purchase_result_is_automatic_then_build_gets_new_twenty_second_clock():
     assert engine.state.turn_step["deadline_at"] is None
     engine.complete_turn_presentation(first["id"])
     assert engine.state.turn_step["step_id"] == "BUILD_DECISION"
-    assert engine.state.turn_step["duration_seconds"] == 20
+    assert engine.state.turn_step["duration_seconds"] == 25
     assert engine.state.turn_step["step_sequence"] > purchase_sequence
 
 
-def test_build_modal_steps_advance_once_and_reopening_does_not_reset_deadline():
+def test_build_modal_substeps_do_not_advance_sequence_or_reset_deadline():
     engine, first, _ = started()
     arrive_at_unowned_land(engine, first["id"])
     engine.purchase_land(first["id"])
     engine.complete_turn_presentation(first["id"])
-    engine.enter_build_step(first["id"], "BUILD_TYPE_SELECTION")
     engine.enter_build_step(first["id"], "BUILD_CONFIRMATION")
     sequence = engine.state.turn_step["step_sequence"]
     deadline = engine.state.turn_step["deadline_at"]
@@ -103,18 +102,18 @@ def test_purchase_and_build_timeouts_decline_without_automatic_construction():
     engine.roll_dice(first["id"])
     engine.complete_turn_presentation(first["id"])
     assert engine.state.turn_step["step_id"] == "MANAGEMENT_DECISION"
-    engine.enter_build_step(first["id"], "BUILD_TYPE_SELECTION")
+    engine.enter_build_step(first["id"], "BUILD_CONFIRMATION")
     engine.state.turn_step["deadline_at"] = 0
     engine.advance_automation()
     assert engine.state.buildings == []
 
 
-def test_roll_timeout_auto_rolls_once_and_counts_only_user_timeout():
+def test_roll_timeout_auto_rolls_once_without_counting_step_as_inactive_turn():
     engine, first, _ = started()
     engine.state.turn_step["deadline_at"] = 0
     engine.advance_automation()
     assert engine.state.turn_has_rolled is True
-    assert engine.state.no_action_counts[first["id"]] == 1
+    assert engine.state.no_action_counts.get(first["id"], 0) == 0
     assert engine.state.turn_step["user_input_required"] is False
 
 
@@ -157,15 +156,15 @@ def test_concurrent_timeout_is_applied_once():
         list(pool.map(lambda _: engine.run_serialized(engine.advance_automation), range(30)))
     timeout_logs = [item for item in engine.state.game_log if item["category"] == "turn_step" and item["message"] == "step_timeout"]
     assert len(timeout_logs) == 1
-    assert engine.state.no_action_counts[first["id"]] == 1
+    assert engine.state.no_action_counts.get(first["id"], 0) == 0
 
 
 def test_presets_and_official_response_timers_remain_independent():
     fast, _, _ = started(preset="fast")
     assert fast.state.config.turn_total_limit_seconds == 60
-    assert fast._effective_step_limits()["ROLL_DECISION"] == 10
+    assert fast._effective_step_limits()["ROLL_DECISION"] == 8
     leisurely, _, _ = started(preset="leisurely")
-    assert leisurely.state.config.turn_total_limit_seconds == 180
+    assert leisurely.state.config.turn_total_limit_seconds == 150
     assert leisurely._effective_step_limits()["TRADE_CONFIGURATION"] == 40
     assert leisurely.rules["constants"]["request_timeout_seconds"] == 10
 
@@ -187,3 +186,51 @@ def test_reconnect_grace_is_optional_and_applied_only_once_per_step():
     engine.reconnect_player(first["id"], token, engine.state.game_instance_id)
     assert once == before + 5
     assert engine.state.turn_step["deadline_at"] == once
+
+
+def test_three_step_timeouts_in_one_turn_count_as_one_inactive_turn_only_at_turn_end():
+    engine, first, _ = started()
+    engine.state.turn_step["deadline_at"] = 0
+    engine.advance_automation()
+    engine.complete_turn_presentation(first["id"])
+    if engine.state.pending_action:
+        engine.state.turn_step["deadline_at"] = 0
+        engine.advance_automation()
+    engine.state.turn_step["deadline_at"] = 0
+    engine.advance_automation()
+    assert engine.state.no_action_counts[first["id"]] == 1
+    timeout_logs = [item for item in engine.state.game_log if item["category"] == "turn_step" and item["message"] == "step_timeout"]
+    assert len(timeout_logs) >= 2
+
+
+def test_step_timeout_then_direct_user_input_is_not_inactive_turn():
+    engine, first, _ = started()
+    engine.state.turn_step["deadline_at"] = 0
+    engine.advance_automation()
+    engine.complete_turn_presentation(first["id"])
+    if engine.state.pending_action:
+        engine.decline_pending_action(first["id"])
+        engine.complete_turn_presentation(first["id"])
+    engine.end_turn(first["id"])
+    assert engine.state.no_action_counts.get(first["id"], 0) == 0
+
+
+def test_three_fully_inactive_turns_auto_exit_player():
+    engine, first, second = started()
+    for _ in range(3):
+        while engine.current_player().id != first["id"]:
+            engine.force_end_current_turn()
+        engine.state.turn_step["deadline_at"] = 0
+        engine.advance_automation()
+        engine.complete_turn_presentation(first["id"])
+        if engine.state.pending_action:
+            engine.state.turn_step["deadline_at"] = 0
+            engine.advance_automation()
+        engine.state.turn_step["deadline_at"] = 0
+        engine.advance_automation()
+        if engine._find_player(first["id"]).status == "exited":
+            break
+        while engine.current_player().id != first["id"]:
+            engine.force_end_current_turn()
+    assert engine._find_player(first["id"]).status == "exited"
+    assert engine.current_player().id in {second["id"], first["id"]}

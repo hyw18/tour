@@ -1,48 +1,34 @@
-# 최신 HEAD 전체 기능·UI 재감사
+# RULE_GAP_REPORT_CURRENT
 
-- 분석 기준 HEAD: `5cf5b6a8edd0ac27f40efb262cec87cea381107c`
-- 분석일: 2026-07-16
-- 공식 규칙 버전: `2026.07.16.1`
-- 감사 범위: 기준 HEAD와 본 감사 작업 트리의 서버, 플레이어 UI, 애니메이션, 동시성, 접근성
+- 작업 전 커밋: `d0fa8bf2f4bfa7a5d99eeb35dbdda62c92123dd3`
+- 작업 후 커밋: `UNCOMMITTED_WORKTREE`
+- 테스트를 실제 실행한 커밋: `d0fa8bf2f4bfa7a5d99eeb35dbdda62c92123dd3` + working tree changes
+- 브라우저 테스트를 실행한 커밋: `NOT_RUN_NODE_NOT_INSTALLED`
 
-과거 `bd3d295f` 보고 결과는 검증 근거로 재사용하지 않았다. 현재 분류는 코드 존재와
-실행 검증을 구분하며, 브라우저와 실제 기기에서 실행하지 못한 항목을 완료로 판정하지 않는다.
+## 해결됨
 
-## 발견한 차이와 현재 상태
+| 항목 | 상태 | 근거 |
+| --- | --- | --- |
+| 단계 timeout과 무조작 턴 분리 | RESOLVED | `GameState.turn_activity`, `tests/test_turn_step_timers.py` |
+| 건설 3단계 시간 반복 | RESOLVED | 건설 서버 입력 단계는 `BUILD_DECISION` 하나, 모달 변화는 `client_substep` |
+| 단계 재접속 유예 반복 | RESOLVED | 유예 키에 `game_instance_id + turn_id + player_id + step_sequence` 사용 |
+| 옛 숨은 타이머 제출 | RESOLVED | 호스트 UI에서 hidden `turnLimit` 제거, `legacy_turn_limit_seconds`로 호환 |
+| timeout 메시지 모호함 | RESOLVED | 단계별 한국어 자동 처리 메시지 |
 
-| 항목 | 발견한 차이 | 상태 |
-|---|---|---|
-| 멱등 키 | 누락만 거부하고 공백·길이·문자 검증과 동일 키 네트워크 재시도가 없었음 | UNIT_TESTED |
-| 위험 행동 확인 | 건설 외 구매·매각·거래·회수·부활이 즉시 POST됨 | UNIT_TESTED |
-| 거래 상태 | 제안·성립·거절·만료가 경로 기반 경제 유형으로 합쳐짐 | UNIT_TESTED |
-| 경제 연출 경계 | 첫 개인 조회에서 모든 과거 action을 확인 처리해 조회 중 경합 가능 | UNIT_TESTED |
-| 자산 강조 | 모든 `.asset-row`를 강조함 | UNIT_TESTED |
-| 이벤트 탭 | 내부 ID 노출, 프런트 진행률 재계산 | UNIT_TESTED |
-| 최근 원장 | 내부 source 코드만 표시하고 라운드·턴·상대가 없었음 | UNIT_TESTED |
-| 사운드 | 실제 효과음 없이 음소거 설정 노출 | UNIT_TESTED |
-| 실제 Chromium | 기본 실행은 라이브러리 부재, 임시 비권한 라이브러리 경로로 실행 성공 | BROWSER_TESTED |
-| 턴/행동 안내 | `turnTitle`과 `mainGuide`가 “내 턴”을 중복하고 프런트가 행동 문구를 추측 | BROWSER_TESTED |
-| 행동 우선순위 | 모든 버튼을 같은 비중으로 노출 | BROWSER_TESTED |
-| 도착 카드 행동 | 행동 이름만 나열하고 명령 영역과 떨어져 있음 | BROWSER_TESTED |
-| 방문비용 | 같은 지역의 과거 지출을 현재 비용처럼 표시 | UNIT_TESTED |
-| 재무 탭 | 하나의 자산 패널 안 섹션을 숨김 | BROWSER_TESTED |
-| 초보자 안내 | 최초·상황별 도움말 없음 | BROWSER_TESTED |
+## 부분 해결
 
-## 상태 분류 요약
+| 항목 | 상태 | 남은 일 |
+| --- | --- | --- |
+| 서버 단계와 클라이언트 장면 분리 | PARTIAL | 화면 표시 묶음은 분리했지만 독립 `ClientPresentationScene` 데이터 모델은 없음 |
+| 결과 확인/턴 종료 중복 | PARTIAL | 단순 결과는 비입력 표현 단계지만 중요 결과의 `next_step_behavior` 명시 필드는 없음 |
+| 전체 wall-clock 안전 상한 | PARTIAL | 공개 필드는 추가했으나 강제 로직은 없음 |
+| 봇 presentation backlog | PARTIAL | 정책은 문서화했지만 `presentation_backlog` API 필드는 없음 |
 
-- CODE_PRESENT: 공통 확인 모달, 서버 이벤트 진행률, 경제 커서, 관련 자산 식별자.
-- UNIT_TESTED: 키 형식·재시도 계약, 거래 거절 무결제, 정산 순서, 이벤트 ID 비노출, 커서 경계.
-- MULTI_CLIENT_TESTED: 기존 100회 동일 키 실행, 재접속, 4세션 상태 일치 테스트가 최신 작업 트리에서 재실행됨.
-- BROWSER_TESTED: 임시 로컬 공유 라이브러리로 Chromium을 실행해 호스트 1·플레이어 4 컨텍스트의 입장, 도움말, 주사위, 구매, 건설, 재무, 재접속, 회전, 매각/환급을 검증. 콘솔 오류와 HTTP 500 없음.
-- REAL_DEVICE_TEST_REQUIRED: Android Chrome, Samsung Internet, iOS/WebKit의 회전·터치·장시간 성능.
-- CONFLICT: 현재 확인된 공식 확정 규칙 충돌 없음.
-- UNRESOLVED: TAX-005, EVENT-010, ASSET-006.
+## UNRESOLVED
 
-## 변경 금지 UNRESOLVED
+다음 공식 규칙은 임의 확정하지 않았다.
 
-- TAX-005: 미개발 토지 0.5%p
-- EVENT-010: 현재 이벤트 카드 공식 승인 여부
-- ASSET-006: 복합 건물 최종 정산가 0원 여부
-
-세 항목은 계산을 변경하지 않았다. 상세 결정 대기 문구는 호스트/규칙 문서에 유지하고
-일반 플레이어 기본 화면과 이벤트 카드에서는 제거했다.
+- 미개발 토지세 0.5%p
+- 이벤트 카드 공식 승인
+- 복합 건물 최종 정산가
+- 실제 기기 UX 검증

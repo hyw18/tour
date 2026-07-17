@@ -1,98 +1,54 @@
-# 한 턴 단계 분리 및 단계별 제한시간 감사
+# TURN_STEP_TIMER_AUDIT
 
-- 분석 기준 main HEAD: `5cf5b6a8edd0ac27f40efb262cec87cea381107c`
-- 구현·검증일: 2026-07-17
+- 작업 전 커밋: `d0fa8bf2f4bfa7a5d99eeb35dbdda62c92123dd3`
+- 작업 후 커밋: `UNCOMMITTED_WORKTREE`
+- 테스트를 실제 실행한 커밋: `d0fa8bf2f4bfa7a5d99eeb35dbdda62c92123dd3` + working tree changes
+- 브라우저 테스트를 실행한 커밋: `NOT_RUN_NODE_NOT_INSTALLED`
 
-## 기존 단일 타이머
+## 결론
 
-기존 서버는 `_start_turn()`에서 `turn_started_at`을 한 번 기록하고
-`elapsed_turn_seconds()`를 주사위 선택부터 최종 턴 종료까지 계속 증가시켰다. 따라서 서버
-주사위 계산, 클라이언트 주사위·이동·도착·경제 연출, 구매·건설 판단이 같은 제한시간을
-소비했다. 호스트 일시중지는 `turn_elapsed_before_pause`로 보정했고, 토지·운영권 거래는
-제안자의 턴 시계를 별도로 멈췄다. 거래·용도 변경 승인·파산 인수는 각 요청의
-`created_at` 또는 `approver_started_at`을 기준으로 10초를 계산했다. 전체 턴 만료는
-무행동 횟수를 증가시키고 바로 다음 플레이어로 넘겼다.
+최신 HEAD의 단계형 턴 시스템은 서버 규칙 단계와 화면 표시 단계를 같은 `turn_step`으로 다루는 경향이 있었다. 특히 `BUILD_DECISION -> BUILD_TYPE_SELECTION -> BUILD_CONFIRMATION`이 각각 별도 제한시간을 받아 한 번의 건설에 시간이 반복 지급될 수 있었고, 단계 timeout마다 `no_action_counts`를 증가시켜 "3회의 무조작 턴" 규칙이 "3개의 무조작 단계"처럼 작동할 위험이 있었다.
 
-## 서버 단계 모델
+이번 작업 후 서버 사용자 입력 단계는 다음으로 정리됐다.
 
-`GameState.turn_step`은 `turn_id`, `step_id`, `step_sequence`, `player_id`, `label`,
-`started_at`, `deadline_at`, `duration_seconds`, `timeout_action`,
-`user_input_required`, `status`를 가진다. 서버가 유일한 deadline 기준이며 클라이언트에는
-계산된 `remaining_seconds`와 `turn_total_remaining_seconds`를 제공한다. 동일 step을 다시
-요청하면 기존 객체를 반환하므로 모달 재열기, 폴링, 새로고침, 재접속, 멱등 재전송은
-시간을 초기화하지 않는다.
+| 흐름 | 서버 단계 | 기본 시간 |
+| --- | --- | --- |
+| 주사위 | `ROLL_DECISION` | 12초 |
+| 토지/특수지역 구매 | `LAND_PURCHASE_DECISION`, `SPECIAL_PURCHASE_DECISION` | 15초 |
+| 건설 | `BUILD_DECISION` | 25초 |
+| 관리 | `MANAGEMENT_DECISION` | 25초 |
+| 거래 작성 | `TRADE_CONFIGURATION` | 30초 |
+| 이벤트 확인 | `EVENT_CONFIRMATION` | 20초 |
+| 턴 마무리 | `TURN_END_DECISION` | 8초 |
 
-핵심 흐름은 다음과 같다.
+건설 모달의 유형 변경, 미리보기, 최종 확인은 같은 `step_sequence` 안의 `client_substep`으로만 기록된다. 같은 모달을 다시 열어도 deadline은 초기화되지 않는다.
 
-`ROLL_DECISION → ROLL_RESOLUTION → ARRIVAL_PRESENTATION/SETTLEMENT_PRESENTATION →
-도착별 선택 → RESULT_CONFIRMATION → TURN_END_DECISION → TURN_COMPLETE`
+## Timeout과 무조작 턴
 
-무주지는 `LAND_PURCHASE_DECISION`, 구매 성공 후 `BUILD_DECISION`, 본인 토지는
-`MANAGEMENT_DECISION`, 건설 UI는 `BUILD_TYPE_SELECTION → BUILD_CONFIRMATION`, 거래 작성은
-`TRADE_CONFIGURATION`, 이벤트 공개 후에는 `EVENT_CONFIRMATION`을 사용한다. 거래·용도
-변경 응답은 각각 `TRADE_RESPONSE`, `USAGE_CHANGE_RESPONSE`로 표시하지만 공식 10초
-요청 시계를 그대로 사용하며 현재 턴의 누적 선택시간에는 포함하지 않는다.
+`turn_activity`를 도입해 단계 timeout과 턴 단위 무조작을 분리했다.
 
-## 기본 제한시간과 전체 상한
+```text
+had_valid_user_input
+step_timeout_count
+automatic_actions
+last_valid_input_at
+```
 
-| 단계 | 기본 |
-|---|---:|
-| 주사위 | 15초 |
-| 토지·특수지역 구매 | 15초 |
-| 건설 여부 | 20초 |
-| 건물 유형·확인 | 각 20초 |
-| 관리 | 25초 |
-| 거래 작성 | 30초 |
-| 이벤트 확인 | 15초 |
-| 턴 종료 | 10초 |
+단계 timeout은 `step_timeout_count`와 `automatic_actions`만 갱신한다. `no_action_counts`는 턴 종료 시 `had_valid_user_input == false`인 경우에만 최대 1회 증가한다. 정상 구매 포기, 건설 포기, 턴 종료, 구매/건설 확정은 유효 입력으로 기록된다. 자동 주사위, 자동 이벤트 확인, 거래 상대 응답 대기, 서버 표현 단계는 유효 입력으로 기록하지 않는다.
 
-프리셋은 빠름(단순 10초·복잡 15초·전체 60초), 기본(전체 120초), 여유(단순
-25초·복잡 40초·전체 180초), 직접 설정, 무제한이다. 전체 상한은 사용자 입력 단계에서
-경과한 시간만 누적한다. 서버 계산, 연출, 거래 상대 응답, 일시중지와 빠른 시뮬레이션은
-제외한다.
+## 입력 상한
 
-## timeout과 자동 퇴장
+기존 `turn_total_limit_seconds`는 실제 의미가 "사용자 입력 누적 상한"이므로 공개 설정에 `turn_input_limit_seconds` 별칭을 추가했다. 현재 서버 처리와 표현 유예를 포함하는 별도 wall-clock 안전 상한은 `turn_wall_clock_safety_limit_seconds: null`로 노출하며, 실제 강제 로직은 아직 도입하지 않았다.
 
-- 주사위: 서버 자동 주사위
-- 토지·특수지역 구매: 구매 포기
-- 건설 여부·유형·확인: 건설하지 않음; 유형 자동 선택 금지
-- 관리·거래 작성: 해당 행동 없이 턴 종료 단계로 이동
-- 이벤트: 확인 처리 후 턴 종료 단계로 이동
-- 턴 종료: 자동 종료
-- 전체 상한: pending과 미완료 거래를 정리하고 턴 종료
+## 재접속 유예
 
-사용자 선택 단계 timeout은 `no_action_count`를 1 증가시킨다. 자동 단계, 서버 오류,
-거래 상대 응답 대기는 증가시키지 않는다. 기존 `EVENT-011`에 따라 이벤트 확인 timeout은
-자동 퇴장 횟수로 남기지 않는다. 정상 포기와 정상 행동은 활동으로 기록된다. 모든 timeout은
-`step_timeout` 또는 `turn_total_timeout` 구조화 로그와 사용자 메시지를 남기며, 전역 잠금과
-step sequence 변화로 동시 timeout도 한 번만 적용된다.
+재접속 유예 키를 `(game_instance_id, turn_id, player_id, step_sequence)`로 확장해 같은 단계에서 브라우저/기기/토큰 재사용으로 반복 연장되지 않게 했다.
 
-## 일시중지·재접속·봇
+## 검증
 
-호스트 일시중지는 단계의 `started_at`·`deadline_at`, 전체 누적시간, 거래·승인 요청
-시각을 함께 보정한다. 일반 새로고침은 유예나 초기화를 만들지 않는다. 호스트가 선택한
-경우에만 새 세션의 토큰 재접속에 5초 또는 10초를 같은 단계에서 한 번 제공하며 사용
-기록을 남긴다. 기본값은 악용을 피하기 위해 0초다.
-
-봇은 사람과 같은 `turn_step` 전환 메서드를 사용하지만 전략을 즉시 실행하므로 timeout에
-의존하지 않는다. 일반 게임의 화면 pacing만 클라이언트에서 적용하고 빠른 시뮬레이션은
-모든 단계 deadline과 표현 대기를 생략한다.
-
-## UI와 검증
-
-상단 타이머는 `단계명 · 남은 단계 시간 · 전체 최대 남은 시간`을 표시한다. 자동 단계는
-`제한시간 정지`, 10초 이하는 주의, 5초 이하는 긴급 상태다. 단계 표시기는 이번 턴에 실제로
-거친 단계만 완료·현재·예정 상태로 표시한다.
-
-엔진 테스트는 단계 생성, 자동 단계 정지, 구매·건설 새 시간, 모달·새로고침 deadline
-보존, 안전 timeout, 자동 주사위, 전체 상한, 일시중지, 프리셋, 봇·빠른 시뮬레이션,
-동시 timeout, 한 단계당 1회 재접속 유예를 검사한다. Chromium 테스트는 단계명,
-연출 중 정지 문구, 구매 단계, 건설 확인 단계, 구매 모달 재열기 deadline 보존과 기존
-호스트 1·플레이어 4 흐름을 검증했다.
-
-## 남은 실기기 조정
-
-Android Chrome, Samsung Internet, iOS Safari에서 좁은 가로 화면의 긴 단계명, 5초
-긴급 색상 인지성, 백그라운드 복귀 직후 서버 보정 체감을 확인해야 한다. 파산 토지 인수와
-부활은 현재도 독립 공식 요청/자격 규칙을 사용하며, 여러 플레이어의 별도 요청을 하나의
-`turn_step`에 합치지 않았다. 장시간 이벤트·거래·파산 실기기 시나리오는 후속 검증 항목이다.
+- `.venv/bin/python -m pytest -q`: 226 passed, 1 skipped
+- `.venv/bin/ruff check .`: passed
+- `.venv/bin/flask --app app routes`: passed
+- `python -m compileall .`: system `python` not installed
+- `node --check static/js/*.js`: `node` not installed
+- `.venv/bin/python -m pytest tests/test_player_browser.py -q -rs`: skipped, Chromium dependency `libnspr4.so` missing

@@ -151,9 +151,9 @@ function renderConfig(config) {
   savedConfig = JSON.parse(JSON.stringify(config));
   document.querySelector("#totalSlots").value = String(config.total_slots);
   document.querySelector("#totalRounds").value = String(config.total_rounds);
-  document.querySelector("#turnLimit").value = config.turn_limit_seconds == null ? "unlimited" : String(config.turn_limit_seconds);
   document.querySelector("#stepTimePreset").value = config.step_time_preset || "default";
-  document.querySelector("#turnTotalLimit").value = config.turn_total_limit_seconds == null ? "unlimited" : String(config.turn_total_limit_seconds);
+  const inputLimit = config.turn_input_limit_seconds ?? config.turn_total_limit_seconds;
+  document.querySelector("#turnTotalLimit").value = inputLimit == null ? "unlimited" : String(inputLimit);
   document.querySelector("#reconnectGrace").value = String(config.reconnect_grace_seconds || 0);
   document.querySelectorAll("[data-step-limit]").forEach((input) => {
     const value = config.step_time_limits?.[input.dataset.stepLimit];
@@ -173,7 +173,7 @@ function updateControlsForPhase(state) {
   const editable = ["setup", "lobby"].includes(phase) && !requestInFlight;
   const readySlots = new Set((state.players || []).filter((player) => player.status !== "exited").map((player) => player.slot_index));
   const allSlotsReady = readySlots.size === Number(state.config?.total_slots || 0);
-  document.querySelectorAll("#totalSlots,#totalRounds,#turnLimit,#stepTimePreset,#turnTotalLimit,#reconnectGrace,#botDelay,#fastSimulation,[data-step-limit],[data-slot-type]")
+  document.querySelectorAll("#totalSlots,#totalRounds,#stepTimePreset,#turnTotalLimit,#reconnectGrace,#botDelay,#fastSimulation,[data-step-limit],[data-slot-type]")
     .forEach((element) => { element.disabled = !editable; });
   document.querySelectorAll("[data-bot-strategy]").forEach((element) => {
     const type = element.closest(".slot-row")?.querySelector("[data-slot-type]")?.value;
@@ -238,7 +238,6 @@ function configPayload() {
     slot_types: [...document.querySelectorAll("[data-slot-type]")].map((el) => el.value),
     bot_strategies: [...document.querySelectorAll("[data-bot-strategy]")].map((el) => el.value),
     total_rounds: Number(document.querySelector("#totalRounds").value),
-    turn_limit_seconds: document.querySelector("#turnLimit").value,
     step_time_preset: document.querySelector("#stepTimePreset").value,
     turn_total_limit_seconds: document.querySelector("#turnTotalLimit").value,
     reconnect_grace_seconds: Number(document.querySelector("#reconnectGrace").value),
@@ -255,9 +254,8 @@ function normalizedConfig(config) {
     total_rounds: Number(config.total_rounds),
     slot_types: [...config.slot_types],
     bot_strategies: [...config.bot_strategies],
-    turn_limit_seconds: ["unlimited", "none", ""].includes(String(config.turn_limit_seconds)) ? null : Number(config.turn_limit_seconds),
     step_time_preset: config.step_time_preset || "default",
-    turn_total_limit_seconds: ["unlimited", "none", ""].includes(String(config.turn_total_limit_seconds)) ? null : Number(config.turn_total_limit_seconds),
+    turn_total_limit_seconds: ["unlimited", "none", ""].includes(String(config.turn_total_limit_seconds ?? config.turn_input_limit_seconds)) ? null : Number(config.turn_total_limit_seconds ?? config.turn_input_limit_seconds),
     reconnect_grace_seconds: Number(config.reconnect_grace_seconds || 0),
     step_time_limits: Object.fromEntries(editableStepIds.map((key) => [key, config.step_time_limits?.[key] == null ? null : Number(config.step_time_limits[key])])),
     bot_action_delay: Number(config.bot_action_delay),

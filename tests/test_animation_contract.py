@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from game.engine import GameEngine, GameRuleError
+from game.engine import GameEngine
 
 
 ROOT = Path(__file__).parents[1]
@@ -105,8 +105,8 @@ def test_chained_events_keep_occurrence_order_and_acknowledge_exactly_once():
     assert acknowledged["occurrence_id"] == first["occurrence_id"]
     remaining = engine.player_private_state(a["id"])["pending_event_occurrences"]
     assert [item["occurrence_id"] for item in remaining] == [pending[1]["occurrence_id"]]
-    with pytest.raises(GameRuleError, match="no new event"):
-        engine.acknowledge_events(a["id"], version, first["occurrence_id"])
+    duplicate = engine.acknowledge_events(a["id"], version, first["occurrence_id"])
+    assert duplicate["duplicate"] is True
 
 
 def test_event_effect_exists_before_ack_and_reset_removes_old_occurrences():

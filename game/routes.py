@@ -415,6 +415,19 @@ def api_event_presentation_revealed():
     return engine().finish_event_presentation_animation(payload.get("player_id"), payload.get("occurrence_id"))
 
 
+@bp.post("/api/event/presentation/finish")
+@mutating_route(record_activity=False)
+def api_event_presentation_finish():
+    payload = request.get_json(force=True, silent=True) or {}
+    require_player(payload.get("player_id"))
+    return engine().finish_event_presentation(
+        payload.get("player_id"),
+        payload.get("occurrence_id"),
+        payload.get("exclusion_token"),
+        payload.get("reason", "finished"),
+    )
+
+
 @bp.post("/api/turn-step/presentation-complete")
 @mutating_route(record_activity=False)
 def api_turn_step_presentation_complete():
@@ -567,7 +580,7 @@ def api_revive():
 
 
 @bp.post("/api/event/acknowledge")
-@mutating_route
+@mutating_route(record_activity=False)
 def api_event_acknowledge():
     payload = request.get_json(force=True, silent=True) or {}
     player_id = payload.get("player_id")
@@ -975,3 +988,10 @@ def dev_run_all_bot_max_speed():
     require_debug_tools()
     require_host()
     return engine().run_all_bot_max_speed()
+
+
+@dev_bp.get("/api/dev/debug-turn-state")
+def dev_debug_turn_state():
+    require_debug_tools()
+    require_host()
+    return jsonify(engine().debug_turn_state())

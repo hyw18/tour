@@ -10,9 +10,12 @@ async function postJson(url, body, options = {}) {
   const gameInstanceId = window.currentGameInstanceId || window.localStorage.getItem("tour_game_instance_id");
   const logicalKey = options.idempotencyKey || idempotencyKey();
   const retryCount = Math.max(0, Math.min(3, Number(options.retryCount ?? 1)));
+  const timeoutMs = Number(options.timeoutMs ?? 10000);
+  const timeoutController = !options.signal && timeoutMs > 0 ? new AbortController() : null;
+  const timeoutId = timeoutController ? window.setTimeout(() => timeoutController.abort(), timeoutMs) : null;
   const requestOptions = {
       method: "POST",
-      signal: options.signal,
+      signal: options.signal || timeoutController?.signal,
       headers: {
         "Content-Type": "application/json",
         "Idempotency-Key": logicalKey,
@@ -22,13 +25,17 @@ async function postJson(url, body, options = {}) {
       body: JSON.stringify(body || {})
   };
   let response;
-  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
-    try {
-      response = await fetch(url, requestOptions);
-      break;
-    } catch (error) {
-      if (attempt >= retryCount || error.name === "AbortError") throw error;
+  try {
+    for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+      try {
+        response = await fetch(url, requestOptions);
+        break;
+      } catch (error) {
+        if (attempt >= retryCount || error.name === "AbortError") throw error;
+      }
     }
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
   }
   const data = await response.json();
   if (!response.ok) {

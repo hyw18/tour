@@ -44,13 +44,208 @@ class IdempotencyConflict(GameRuleError):
     pass
 
 
+class TurnTimerService:
+    EVENT_EXCLUSION_TTL_SECONDS = {
+        "event_animation": 5,
+        "event_acknowledgement": 10,
+    }
+
+    def __init__(self, engine):
+        self.engine = engine
+
+    def timeout_message(self, step_id):
+        return {
+            "ROLL_DECISION": "주사위 선택 시간이 끝나 자동으로 굴렸습니다. 도착 칸을 확인하세요.",
+            "LAND_PURCHASE_DECISION": "토지 구매 시간이 끝나 구매하지 않았습니다. 턴 마무리로 이동합니다.",
+            "SPECIAL_PURCHASE_DECISION": "특수지역 구매 시간이 끝나 구매하지 않았습니다. 턴 마무리로 이동합니다.",
+            "BUILD_DECISION": "건설 시간이 끝나 이번 방문에는 건설하지 않습니다. 턴 마무리로 이동합니다.",
+            "MANAGEMENT_DECISION": "관리 선택 시간이 끝나 턴 마무리로 이동합니다.",
+            "TRADE_CONFIGURATION": "거래 작성 시간이 끝나 거래를 취소하고 턴 마무리로 이동합니다.",
+            "EVENT_CONFIRMATION": "이벤트 확인 시간이 끝나 확인 처리하고 턴 마무리로 이동합니다.",
+            "TURN_END_DECISION": "턴 마무리 시간이 끝나 자동으로 종료했습니다.",
+            "BANKRUPTCY_TAKEOVER": "파산 인수 시간이 끝나 인수하지 않았습니다.",
+            "REVIVAL_DECISION": "부활 선택 시간이 끝나 이번 응답을 건너뛰었습니다.",
+        }.get(step_id, "선택 시간이 끝나 자동 처리했습니다.")
+
+    def presentation_timeout_seconds(self, step_id):
+        return {
+            "ARRIVAL_PRESENTATION": 2,
+            "RESULT_CONFIRMATION": 2,
+            "SETTLEMENT_PRESENTATION": 7,
+            "ROLL_RESOLUTION": 2,
+        }.get(step_id)
+
+    def event_pause_ttl_seconds(self, pause):
+        return self.EVENT_EXCLUSION_TTL_SECONDS.get(pause.get("reason"), 10)
+
+
+class TurnFlowService:
+    def __init__(self, engine):
+        self.engine = engine
+
+    def decision_step_after_presentation(self, player_id):
+        pending = self.engine.state.pending_action or {}
+        if pending.get("player_id") == player_id:
+            if pending.get("type") == "build" and pending.get("source") == "owned_land_visit":
+                return "MANAGEMENT_DECISION"
+            return {
+                "purchase_land": "LAND_PURCHASE_DECISION",
+                "purchase_special": "SPECIAL_PURCHASE_DECISION",
+                "build": "BUILD_DECISION",
+            }.get(pending.get("type"), "MANAGEMENT_DECISION")
+        return "TURN_END_DECISION"
+
+    def can_roll(self, player_id):
+        engine = self.engine
+        player = engine._find_player(player_id)
+        step = engine.state.turn_step or {}
+        blocking = {
+            "turn_step": step.get("step_id"),
+            "pending_action": deepcopy(engine.state.pending_action),
+            "event_occurrence_id": None,
+        }
+        if engine.state.phase != "active" or engine.state.ended:
+            return engine._action(False, "게임이 진행 중이 아닙니다.", reason_code="GAME_NOT_ACTIVE", blocking_state=blocking)
+        if engine.state.paused:
+            return engine._action(False, "호스트가 게임을 일시중지했습니다.", reason_code="GAME_PAUSED", blocking_state=blocking)
+        if not player or player.status != "active":
+            return engine._action(False, "활성 플레이어만 주사위를 굴릴 수 있습니다.", reason_code="PLAYER_NOT_ACTIVE", blocking_state=blocking)
+        current = engine.current_player()
+        if not current or current.id != player.id:
+            return engine._action(False, "현재 차례가 아닙니다.", reason_code="NOT_CURRENT_PLAYER", blocking_state=blocking)
+        if engine.state.turn_has_rolled:
+            return engine._action(False, "이번 턴에는 이미 주사위를 굴렸습니다.", reason_code="ALREADY_ROLLED", blocking_state=blocking)
+        if engine.state.pending_action:
+            return engine._action(False, "도착 칸의 선택을 먼저 완료하세요.", reason_code="PENDING_ACTION", blocking_state=blocking)
+        if step.get("step_id") == "EVENT_CONFIRMATION":
+            unacknowledged = [
+                item for item in engine._visible_event_occurrences(player)
+                if item["occurrence_id"] not in engine.state.event_acknowledged_occurrences.get(player.id, set())
+            ]
+            blocking["event_occurrence_id"] = unacknowledged[-1]["occurrence_id"] if unacknowledged else None
+            return engine._action(False, "이벤트 확인을 먼저 완료하세요.", reason_code="EVENT_CONFIRMATION_PENDING", blocking_state=blocking)
+        if engine.state.land_trade_offer or engine.state.operating_right_offer or engine.state.usage_change_request or engine.state.pending_land_takeover:
+            return engine._action(False, "대기 중인 요청을 먼저 처리하세요.", reason_code="REQUEST_PENDING", blocking_state=blocking)
+        if step.get("step_id") != "ROLL_DECISION" or step.get("player_id") != player.id:
+            return engine._action(False, "이전 단계 처리가 완료되지 않았습니다.", reason_code="WRONG_TURN_STEP", blocking_state=blocking)
+        return engine._action(True, "", reason_code="", blocking_state=blocking)
+
+
+class EventPresentationService:
+    def __init__(self, engine):
+        self.engine = engine
+
+    def _visible_occurrence(self, player, occurrence_id):
+        return next(
+            (item for item in self.engine._visible_event_occurrences(player) if item["occurrence_id"] == occurrence_id),
+            None,
+        )
+
+    def start(self, player_id, occurrence_id, stage="animation"):
+        player = self.engine._require_current_player(player_id)
+        acknowledged = self.engine.state.event_acknowledged_occurrences.get(player_id, set())
+        occurrence = self._visible_occurrence(player, occurrence_id)
+        if not occurrence or occurrence_id in acknowledged:
+            raise GameRuleError("event occurrence is not awaiting presentation")
+        existing = self.engine.state.event_timer_pause
+        reason = "event_acknowledgement" if stage == "acknowledgement" else "event_animation"
+        if existing and existing.get("player_id") == player_id and existing.get("occurrence_id") == occurrence_id:
+            existing["reason"] = reason
+            existing["stage"] = stage
+            return deepcopy(existing)
+        if existing:
+            self.finish(existing.get("player_id"), existing.get("occurrence_id"), existing.get("token"), "superseded")
+        step = self.engine.state.turn_step or {}
+        pause = {
+            "token": token_urlsafe(16),
+            "player_id": player_id,
+            "occurrence_id": occurrence_id,
+            "turn_id": step.get("turn_id"),
+            "step_sequence": step.get("step_sequence"),
+            "reason": reason,
+            "stage": stage,
+            "started_at": monotonic(),
+            "status": "active",
+        }
+        self.engine.state.event_timer_pause = pause
+        return deepcopy(pause)
+
+    def finish(self, player_id, occurrence_id, exclusion_token=None, reason="finished"):
+        pause = self.engine.state.event_timer_pause
+        if (
+            not pause
+            or pause.get("player_id") != player_id
+            or pause.get("occurrence_id") != occurrence_id
+            or (exclusion_token and pause.get("token") != exclusion_token)
+        ):
+            return {
+                "player_id": player_id,
+                "occurrence_id": occurrence_id,
+                "exclusion_token": exclusion_token,
+                "event_timer_resumed": False,
+                "reason": reason,
+            }
+        excluded = self.engine._resume_event_timer(player_id, occurrence_id)
+        return {
+            "player_id": player_id,
+            "occurrence_id": occurrence_id,
+            "exclusion_token": pause.get("token"),
+            "event_timer_resumed": True,
+            "excluded_seconds": round(excluded, 3),
+            "reason": reason,
+        }
+
+    def acknowledge(self, player_id, event_version, occurrence_id=None):
+        engine = self.engine
+        player = engine._find_player(player_id)
+        if not player:
+            raise GameRuleError("player not found")
+        try:
+            event_version = int(event_version)
+        except (TypeError, ValueError) as exc:
+            raise GameRuleError("event_version must be an integer") from exc
+        current = len(engine.state.event_history)
+        visible = engine._visible_event_occurrences(player)
+        acknowledged = engine.state.event_acknowledged_occurrences.setdefault(player_id, set())
+        if occurrence_id is None:
+            occurrence_id = next(
+                (item["occurrence_id"] for item in reversed(visible) if item["occurrence_id"] not in acknowledged),
+                None,
+            )
+        occurrence = next((item for item in visible if item["occurrence_id"] == occurrence_id), None)
+        if occurrence_id in acknowledged and occurrence_id:
+            engine._resume_event_timer(player_id, occurrence_id)
+            return self._ack_response(player, event_version, occurrence_id, duplicate=True)
+        occurrence_version = occurrence.get("event_version", current) if occurrence else current
+        if not occurrence or event_version < occurrence_version or event_version > current:
+            raise GameRuleError("no new event to acknowledge")
+        acknowledged.add(occurrence_id)
+        engine._record_activity(player)
+        engine._resume_event_timer(player_id, occurrence_id)
+        engine.state.event_ack_versions[player_id] = event_version
+        if engine.current_player() and engine.current_player().id == player_id:
+            engine._set_turn_step("RESULT_CONFIRMATION", "event_acknowledged", player_id=player_id, next_step="TURN_END_DECISION")
+        return self._ack_response(player, event_version, occurrence_id, duplicate=False)
+
+    def _ack_response(self, player, event_version, occurrence_id, duplicate):
+        return {
+            "player_id": player.id,
+            "recorded": True,
+            "acknowledged": True,
+            "duplicate": duplicate,
+            "event_version": event_version,
+            "occurrence_id": occurrence_id,
+            "event_timer_resumed": self.engine.state.event_timer_pause is None,
+            "next_turn_step": self.engine._public_turn_step(),
+        }
+
+
 class GameEngine:
     MAX_PROCESSED_KEYS = 1_000
     STEP_LABELS = {
         "TURN_START": "턴 시작", "ROLL_DECISION": "주사위 선택", "ROLL_RESOLUTION": "주사위 결과 처리",
         "ARRIVAL_PRESENTATION": "도착 결과 처리", "LAND_PURCHASE_DECISION": "토지 구매 결정",
         "SPECIAL_PURCHASE_DECISION": "특수지역 구매 결정", "BUILD_DECISION": "건물 건설 결정",
-        "BUILD_TYPE_SELECTION": "건물 유형 선택", "BUILD_CONFIRMATION": "건물 건설 확인",
         "MANAGEMENT_DECISION": "관리 행동 선택", "TRADE_CONFIGURATION": "거래 조건 작성",
         "TRADE_RESPONSE": "거래 응답", "USAGE_CHANGE_RESPONSE": "용도 변경 응답",
         "EVENT_CONFIRMATION": "이벤트 확인", "SETTLEMENT_PRESENTATION": "출발지 정산 처리",
@@ -60,17 +255,16 @@ class GameEngine:
     STEP_TIMEOUT_ACTIONS = {
         "ROLL_DECISION": "auto_roll", "LAND_PURCHASE_DECISION": "decline_land_purchase",
         "SPECIAL_PURCHASE_DECISION": "decline_special_purchase", "BUILD_DECISION": "decline_build",
-        "BUILD_TYPE_SELECTION": "decline_build", "BUILD_CONFIRMATION": "cancel_build",
         "MANAGEMENT_DECISION": "skip_management", "TRADE_CONFIGURATION": "cancel_trade",
         "EVENT_CONFIRMATION": "acknowledge_event", "TURN_END_DECISION": "end_turn",
         "BANKRUPTCY_TAKEOVER": "decline_takeover", "REVIVAL_DECISION": "skip_revival",
     }
     USER_INPUT_STEPS = frozenset(STEP_TIMEOUT_ACTIONS)
     DEFAULT_STEP_LIMITS = {
-        "ROLL_DECISION": 15, "LAND_PURCHASE_DECISION": 15, "SPECIAL_PURCHASE_DECISION": 15,
-        "BUILD_DECISION": 20, "BUILD_TYPE_SELECTION": 20, "BUILD_CONFIRMATION": 20,
-        "MANAGEMENT_DECISION": 25, "TRADE_CONFIGURATION": 30, "EVENT_CONFIRMATION": 15,
-        "TURN_END_DECISION": 10, "BANKRUPTCY_TAKEOVER": 15, "REVIVAL_DECISION": 15,
+        "ROLL_DECISION": 12, "LAND_PURCHASE_DECISION": 15, "SPECIAL_PURCHASE_DECISION": 15,
+        "BUILD_DECISION": 25, "MANAGEMENT_DECISION": 25, "TRADE_CONFIGURATION": 30,
+        "EVENT_CONFIRMATION": 20, "TURN_END_DECISION": 8, "BANKRUPTCY_TAKEOVER": 15,
+        "REVIVAL_DECISION": 15,
     }
     COMMERCIAL_VISIT_FEE_RATES = {
         1: (270, 1000),
@@ -115,6 +309,9 @@ class GameEngine:
         self.event_effect_calculator = EventEffectCalculator(self)
         self.settlement_service = SettlementService(self)
         self.bankruptcy_service = BankruptcyService(self)
+        self.turn_timer_service = TurnTimerService(self)
+        self.turn_flow_service = TurnFlowService(self)
+        self.event_presentation_service = EventPresentationService(self)
 
     def run_serialized(self, operation):
         """Run one state operation under the game-wide reentrant lock."""
@@ -311,6 +508,7 @@ class GameEngine:
             repr(self.state.operating_right_offer),
             repr(self.state.usage_change_request),
             repr(self.state.pending_land_takeover),
+            repr(self.state.event_timer_pause),
             tuple((player.id, player.status, player.cash_won, player.position, len(player.lands), len(player.buildings)) for player in self.state.players),
             len(self.state.buildings),
             len(self.state.game_log),
@@ -326,6 +524,7 @@ class GameEngine:
         return token
 
     def reconnect_player(self, player_id, reconnect_token, game_instance_id):
+        self.recover_turn_deadlocks()
         if game_instance_id != self.state.game_instance_id:
             raise GameRuleError("previous game instance has expired")
         player = self._find_player(player_id)
@@ -339,7 +538,7 @@ class GameEngine:
             raise PermissionError("invalid reconnect token")
         step = self.state.turn_step or {}
         grace = self.state.config.reconnect_grace_seconds
-        grace_key = (step.get("turn_id"), step.get("step_sequence"), player_id)
+        grace_key = (self.state.game_instance_id, step.get("turn_id"), player_id, step.get("step_sequence"))
         if grace and step.get("player_id") == player_id and step.get("user_input_required") and grace_key not in self.state.step_reconnect_graces:
             step["started_at"] += grace
             if step.get("deadline_at") is not None:
@@ -359,13 +558,16 @@ class GameEngine:
     def configure(self, payload):
         self._require_lobby()
         requested_preset = str(payload.get("step_time_preset", self.state.config.step_time_preset))
-        preset_total = {"fast": 60, "default": 120, "leisurely": 180, "unlimited": None}.get(requested_preset, self.state.config.turn_total_limit_seconds)
+        preset_total = {"fast": 60, "default": 90, "leisurely": 150, "unlimited": None}.get(requested_preset, self.state.config.turn_total_limit_seconds)
         config = HostConfig(
             total_slots=int(payload.get("total_slots", self.state.config.total_slots)),
             slot_types=list(payload.get("slot_types", self.state.config.slot_types)),
             bot_strategies=list(payload.get("bot_strategies", self.state.config.bot_strategies)),
             total_rounds=int(payload.get("total_rounds", self.state.config.total_rounds)),
-            turn_limit_seconds=payload.get("turn_limit_seconds", self.state.config.turn_limit_seconds),
+            legacy_turn_limit_seconds=payload.get(
+                "legacy_turn_limit_seconds",
+                payload.get("turn_limit_seconds", self.state.config.legacy_turn_limit_seconds),
+            ),
             bot_action_delay=payload.get("bot_action_delay", self.state.config.bot_action_delay),
             fast_simulation=bool(payload.get("fast_simulation", self.state.config.fast_simulation)),
             step_time_preset=requested_preset,
@@ -373,10 +575,10 @@ class GameEngine:
             turn_total_limit_seconds=payload.get("turn_total_limit_seconds", preset_total),
             reconnect_grace_seconds=int(payload.get("reconnect_grace_seconds", self.state.config.reconnect_grace_seconds)),
         )
-        if config.turn_limit_seconds in ("", "none", "unlimited"):
-            config.turn_limit_seconds = None
-        elif config.turn_limit_seconds is not None:
-            config.turn_limit_seconds = int(config.turn_limit_seconds)
+        if config.legacy_turn_limit_seconds in ("", "none", "unlimited"):
+            config.legacy_turn_limit_seconds = None
+        elif config.legacy_turn_limit_seconds is not None:
+            config.legacy_turn_limit_seconds = int(config.legacy_turn_limit_seconds)
         config.bot_action_delay = float(config.bot_action_delay)
         if config.turn_total_limit_seconds in ("", "none", "unlimited"):
             config.turn_total_limit_seconds = None
@@ -555,6 +757,7 @@ class GameEngine:
             raise GameRuleError("not enough cash to buy land")
         if region_id in self.state.land_ownership:
             raise GameRuleError("land already owned")
+        self._record_activity(player)
         player.cash_won -= price
         self._add_expense(player, price, "land_purchase", region_id)
         self.state.land_ownership[region_id] = player.id
@@ -567,7 +770,8 @@ class GameEngine:
         return self.public_state()
 
     def decline_pending_action(self, player_id):
-        self._require_current_player(player_id)
+        player = self._require_current_player(player_id)
+        self._record_activity(player)
         if self.state.pending_action and self.state.pending_action.get("player_id") == player_id:
             pending_type = self.state.pending_action.get("type")
             source = self.state.pending_action.get("source")
@@ -602,6 +806,7 @@ class GameEngine:
             raise GameRuleError("not enough cash to build")
         if building_type in {"industrial", "mixed_use"} and self._building_count(region_id, building_type) >= 1:
             raise GameRuleError(f"{building_type} building is limited to one per region")
+        self._record_activity(player)
         player.cash_won -= price
         self._add_expense(player, price, "building_construction", region_id)
         building = {
@@ -918,61 +1123,22 @@ class GameEngine:
         return {"player_id": player.id, "recorded": True}
 
     def acknowledge_events(self, player_id, event_version, occurrence_id=None):
-        player = self._find_player(player_id)
-        if not player:
-            raise GameRuleError("player not found")
-        try:
-            event_version = int(event_version)
-        except (TypeError, ValueError) as exc:
-            raise GameRuleError("event_version must be an integer") from exc
-        current = len(self.state.event_history)
-        visible = self._visible_event_occurrences(player)
-        acknowledged = self.state.event_acknowledged_occurrences.setdefault(player_id, set())
-        if occurrence_id is None:
-            occurrence_id = next(
-                (item["occurrence_id"] for item in reversed(visible) if item["occurrence_id"] not in acknowledged),
-                None,
-            )
-        occurrence = next((item for item in visible if item["occurrence_id"] == occurrence_id), None)
-        occurrence_version = occurrence.get("event_version", current) if occurrence else current
-        if not occurrence or event_version < occurrence_version or event_version > current or occurrence_id in acknowledged:
-            raise GameRuleError("no new event to acknowledge")
-        acknowledged.add(occurrence_id)
-        self._resume_event_timer(player_id, occurrence_id)
-        self.state.event_ack_versions[player_id] = event_version
-        if self.current_player() and self.current_player().id == player_id:
-            self._set_turn_step("RESULT_CONFIRMATION", "event_acknowledged", player_id=player_id, next_step="TURN_END_DECISION")
-        return {
-            "player_id": player.id,
-            "recorded": True,
-            "event_version": event_version,
-            "occurrence_id": occurrence_id,
-        }
+        return self.event_presentation_service.acknowledge(player_id, event_version, occurrence_id)
 
     def start_event_presentation(self, player_id, occurrence_id, stage="animation"):
-        player = self._require_current_player(player_id)
-        visible = self._visible_event_occurrences(player)
-        acknowledged = self.state.event_acknowledged_occurrences.get(player_id, set())
-        if not any(item["occurrence_id"] == occurrence_id for item in visible) or occurrence_id in acknowledged:
-            raise GameRuleError("event occurrence is not awaiting presentation")
-        existing = self.state.event_timer_pause
-        if existing and existing.get("player_id") == player_id and existing.get("occurrence_id") == occurrence_id:
-            return deepcopy(existing)
-        if existing:
-            self._resume_event_timer(existing.get("player_id"), existing.get("occurrence_id"))
-        self.state.event_timer_pause = {
-            "player_id": player_id,
-            "occurrence_id": occurrence_id,
-            "stage": stage,
-            "started_at": monotonic(),
-        }
-        return {"player_id": player_id, "occurrence_id": occurrence_id, "stage": stage, "timer_excluded": True}
+        result = self.event_presentation_service.start(player_id, occurrence_id, stage)
+        result["timer_excluded"] = True
+        result["exclusion_token"] = result.get("token")
+        return result
 
     def finish_event_presentation_animation(self, player_id, occurrence_id):
         self._require_current_player(player_id)
         excluded = self._resume_event_timer(player_id, occurrence_id)
         self._set_turn_step("EVENT_CONFIRMATION", "event_card_revealed", player_id=player_id)
         return {"player_id": player_id, "occurrence_id": occurrence_id, "excluded_seconds": round(excluded, 3)}
+
+    def finish_event_presentation(self, player_id, occurrence_id, exclusion_token=None, reason="finished"):
+        return self.event_presentation_service.finish(player_id, occurrence_id, exclusion_token, reason)
 
     def _resume_event_timer(self, player_id, occurrence_id):
         pause = self.state.event_timer_pause
@@ -1589,6 +1755,7 @@ class GameEngine:
     def advance_automation(self, force=False):
         if self.state.phase != "active" or self.state.paused or self.state.ended:
             return
+        self.recover_turn_deadlocks()
         self.evaluate_bot_revivals()
         self.expire_land_trade()
         self.expire_operating_right_offer()
@@ -1598,6 +1765,8 @@ class GameEngine:
             self._handle_turn_total_timeout()
         elif self._step_timed_out():
             self._handle_step_timeout()
+        elif self._presentation_timed_out():
+            self._handle_presentation_timeout()
         while True:
             player = self.current_player()
             if not player or not player.is_bot:
@@ -1697,12 +1866,15 @@ class GameEngine:
                 "slot_types": config.slot_types,
                 "bot_strategies": config.bot_strategies,
                 "total_rounds": config.total_rounds,
-                "turn_limit_seconds": config.turn_limit_seconds,
+                "legacy_turn_limit_seconds": config.legacy_turn_limit_seconds,
+                "turn_limit_seconds": config.legacy_turn_limit_seconds,
                 "bot_action_delay": config.bot_action_delay,
                 "fast_simulation": config.fast_simulation,
                 "step_time_preset": config.step_time_preset,
                 "step_time_limits": self._effective_step_limits(),
+                "turn_input_limit_seconds": config.turn_total_limit_seconds,
                 "turn_total_limit_seconds": config.turn_total_limit_seconds,
+                "turn_wall_clock_safety_limit_seconds": None,
                 "reconnect_grace_seconds": config.reconnect_grace_seconds,
                 "bot_pacing": {
                     "turn_start_ms": 400,
@@ -1732,6 +1904,37 @@ class GameEngine:
             }
         )
         return state
+
+    def debug_turn_state(self):
+        player = self.current_player()
+        step = self.state.turn_step or {}
+        return {
+            "game_instance_id": self.state.game_instance_id,
+            "state_version": self.state.state_version,
+            "current_turn_player_id": player.id if player else None,
+            "turn_sequence": self.state.turn_sequence,
+            "turn_has_rolled": self.state.turn_has_rolled,
+            "pending_action": deepcopy(self.state.pending_action),
+            "turn_step": self._public_turn_step(),
+            "turn_step_sequence": self.state.turn_step_sequence,
+            "turn_step_deadline": step.get("deadline_at"),
+            "presentation_deadline": step.get("presentation_deadline_at"),
+            "event_timer_pause": deepcopy(self.state.event_timer_pause),
+            "paused": self.state.paused,
+            "active_event_occurrences": deepcopy(self.state.event_history[-5:]),
+            "event_acknowledged_occurrences": {
+                player_id: sorted(values)
+                for player_id, values in self.state.event_acknowledged_occurrences.items()
+            },
+            "no_action_counts": dict(self.state.no_action_counts),
+            "last_step_transitions": [
+                deepcopy(item) for item in self.state.turn_step_history[-5:]
+            ],
+            "last_timeout_logs": [
+                deepcopy(item) for item in self.state.game_log
+                if item.get("category") == "turn_step" and "timeout" in item.get("message", "")
+            ][-5:],
+        }
 
     def client_public_state(self):
         state = self.public_state()
@@ -2142,7 +2345,6 @@ class GameEngine:
         land_purchased = self.state.land_purchased_this_visit
         request_active = bool(self.state.land_trade_offer or self.state.operating_right_offer or self.state.usage_change_request)
         step_id = (self.state.turn_step or {}).get("step_id")
-        step_reason = "현재 단계의 결과를 먼저 확인하세요."
         current_buildings = [item for item in self.state.buildings if item["region_id"] == current_region_id]
         owned_current = bool(current_region_id and self.state.land_ownership.get(current_region_id) == player.id)
         chain_buildings = [item for item in current_buildings if player.id in item.get("ownership_chain", [])]
@@ -2177,8 +2379,9 @@ class GameEngine:
         special_pending = bool(pending and pending.get("type") == "purchase_special" and step_id == "SPECIAL_PURCHASE_DECISION")
         build_pending = bool(pending and pending.get("type") == "build" and step_id in {"BUILD_DECISION", "MANAGEMENT_DECISION", "BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION"})
         build_allowed = build_allowed and build_pending
+        roll_action = self.turn_flow_service.can_roll(player.id)
         actions = {
-            "roll": self._action(is_turn and not self.state.turn_has_rolled and step_id == "ROLL_DECISION", step_reason if is_turn else turn_reason),
+            "roll": roll_action,
             "end_turn": self._action(
                 is_turn and not pending and step_id in {"MANAGEMENT_DECISION", "TURN_END_DECISION"},
                 "먼저 도착 칸의 선택과 결과 확인을 완료하세요." if is_turn else turn_reason,
@@ -2500,8 +2703,8 @@ class GameEngine:
             raise GameRuleError("total_slots must be 2..4")
         if config.total_rounds not in ALLOWED_ROUNDS:
             raise GameRuleError("total_rounds must be 10..300")
-        if config.turn_limit_seconds not in ALLOWED_TURN_LIMITS:
-            raise GameRuleError("turn_limit_seconds is not allowed")
+        if config.legacy_turn_limit_seconds not in ALLOWED_TURN_LIMITS:
+            raise GameRuleError("legacy_turn_limit_seconds is not allowed")
         if config.bot_action_delay not in ALLOWED_BOT_DELAYS:
             raise GameRuleError("bot_action_delay is not allowed")
         if config.step_time_preset not in STEP_TIME_PRESETS:
@@ -2609,9 +2812,11 @@ class GameEngine:
         if preset == "unlimited":
             return {step_id: None for step_id in self.DEFAULT_STEP_LIMITS}
         if preset == "fast":
-            limits = {step_id: (15 if step_id in {"BUILD_DECISION", "BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION", "MANAGEMENT_DECISION", "TRADE_CONFIGURATION"} else 10) for step_id in self.DEFAULT_STEP_LIMITS}
+            limits = {step_id: (20 if step_id in {"BUILD_DECISION", "MANAGEMENT_DECISION", "TRADE_CONFIGURATION"} else 10) for step_id in self.DEFAULT_STEP_LIMITS}
+            limits["ROLL_DECISION"] = 8
+            limits["TURN_END_DECISION"] = 8
         elif preset == "leisurely":
-            limits = {step_id: (40 if step_id in {"BUILD_DECISION", "BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION", "MANAGEMENT_DECISION", "TRADE_CONFIGURATION"} else 25) for step_id in self.DEFAULT_STEP_LIMITS}
+            limits = {step_id: (40 if step_id in {"BUILD_DECISION", "MANAGEMENT_DECISION", "TRADE_CONFIGURATION"} else 25) for step_id in self.DEFAULT_STEP_LIMITS}
         else:
             limits = dict(self.DEFAULT_STEP_LIMITS)
         if preset == "custom":
@@ -2650,6 +2855,7 @@ class GameEngine:
         self.state.turn_step_sequence += 1
         user_input = step_id in self.USER_INPUT_STEPS
         duration = self._step_duration(step_id) if user_input else None
+        presentation_timeout = None if user_input else self.turn_timer_service.presentation_timeout_seconds(step_id)
         step = {
             "turn_id": f"turn_{self.state.game_instance_id}_{self.state.turn_sequence}",
             "step_id": step_id,
@@ -2658,6 +2864,7 @@ class GameEngine:
             "label": self.STEP_LABELS.get(step_id, step_id),
             "started_at": now,
             "deadline_at": now + duration if duration is not None else None,
+            "presentation_deadline_at": now + presentation_timeout if presentation_timeout is not None else None,
             "duration_seconds": duration,
             "timeout_action": self.STEP_TIMEOUT_ACTIONS.get(step_id),
             "user_input_required": user_input,
@@ -2675,6 +2882,28 @@ class GameEngine:
         self.state.turn_step_history = self.state.turn_step_history[-100:]
         self._log("turn_step", "step_transition", transition)
         return step
+
+    def _start_turn_activity(self, player_id):
+        self.state.turn_activity = {
+            "turn_id": f"turn_{self.state.game_instance_id}_{self.state.turn_sequence}",
+            "player_id": player_id,
+            "had_valid_user_input": False,
+            "step_timeout_count": 0,
+            "automatic_actions": [],
+            "last_valid_input_at": None,
+            "server_error": False,
+            "no_action_recorded": False,
+            "suppress_next_activity": False,
+        }
+
+    def _mark_valid_turn_input(self, player):
+        if not player:
+            return
+        activity = self.state.turn_activity
+        if activity.get("player_id") != player.id:
+            return
+        activity["had_valid_user_input"] = True
+        activity["last_valid_input_at"] = monotonic()
 
     def _public_turn_step(self):
         step = self.state.turn_step
@@ -2706,28 +2935,29 @@ class GameEngine:
             return self.public_state()
         if step.get("step_id") == "USAGE_CHANGE_RESPONSE" and self.state.usage_change_request:
             return self.public_state()
-        next_step = step.get("next_step") or self._decision_step_after_presentation(player_id)
+        next_step = step.get("next_step") or self.turn_flow_service.decision_step_after_presentation(player_id)
         self._set_turn_step(next_step, "presentation_completed", player_id=player_id)
         return self.public_state()
 
     def _decision_step_after_presentation(self, player_id):
-        pending = self.state.pending_action or {}
-        if pending.get("player_id") == player_id:
-            if pending.get("type") == "build" and pending.get("source") == "owned_land_visit":
-                return "MANAGEMENT_DECISION"
-            return {"purchase_land": "LAND_PURCHASE_DECISION", "purchase_special": "SPECIAL_PURCHASE_DECISION", "build": "BUILD_DECISION"}.get(pending.get("type"), "MANAGEMENT_DECISION")
-        return "TURN_END_DECISION"
+        return self.turn_flow_service.decision_step_after_presentation(player_id)
 
     def enter_build_step(self, player_id, step_id):
         self._require_current_player(player_id)
-        if step_id not in {"BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION"}:
+        if step_id not in {"BUILD_DECISION", "BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION"}:
             raise GameRuleError("unsupported build step")
         pending = self._require_pending(player_id, "build")
-        current = (self.state.turn_step or {}).get("step_id")
-        allowed = {"BUILD_TYPE_SELECTION": {"BUILD_DECISION", "MANAGEMENT_DECISION", "BUILD_TYPE_SELECTION"}, "BUILD_CONFIRMATION": {"BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION"}}
-        if current not in allowed[step_id]:
+        current_step = self.state.turn_step or {}
+        current = current_step.get("step_id")
+        if current not in {"BUILD_DECISION", "MANAGEMENT_DECISION"}:
             raise GameRuleError("build step cannot transition from current state")
-        self._set_turn_step(step_id, "build_ui_advanced", player_id=pending["player_id"])
+        current_step.setdefault("client_substep", step_id)
+        current_step["client_substep"] = step_id
+        current_step["label"] = self.STEP_LABELS["BUILD_DECISION"]
+        self._log("turn_step", "build_ui_substep", {
+            "turn_id": current_step.get("turn_id"), "step_sequence": current_step.get("step_sequence"),
+            "player_id": pending["player_id"], "client_substep": step_id,
+        })
         return self.public_state()
 
     def enter_management_step(self, player_id, step_id):
@@ -2747,17 +2977,28 @@ class GameEngine:
         self.state.turn_has_rolled = False
         self.state.turn_total_input_elapsed = 0
         self.state.pending_action = None
+        self.state.event_timer_pause = None
         self.state.land_purchased_this_visit = False
         self.state.successful_build_edit_this_visit = False
         player = self.current_player()
+        self._start_turn_activity(player.id if player else None)
         self._set_turn_step("ROLL_DECISION", "turn_started", player_id=player.id if player else None)
+        if player:
+            step = self.state.turn_step or {}
+            assert step.get("player_id") == player.id
+            assert step.get("step_id") == "ROLL_DECISION"
+            assert self.state.turn_has_rolled is False
+            assert self.state.pending_action is None
 
     def _finish_turn(self, player_id):
+        player = self._find_player(player_id)
+        if player:
+            self._finalize_no_action_for_turn(player, "turn_finished")
         self._set_turn_step("TURN_COMPLETE", "turn_finished", player_id=player_id)
         if self.state.event_timer_pause:
-            self._resume_event_timer(
-                self.state.event_timer_pause.get("player_id"),
-                self.state.event_timer_pause.get("occurrence_id"),
+            pause = self.state.event_timer_pause
+            self.event_presentation_service.finish(
+                pause.get("player_id"), pause.get("occurrence_id"), pause.get("token"), "turn_finished"
             )
         active = self._turn_players()
         if not active:
@@ -2785,7 +3026,27 @@ class GameEngine:
 
     def _record_activity(self, player):
         self.state.last_activity_player_id = player.id
-        self.state.no_action_counts[player.id] = 0
+        activity = self.state.turn_activity
+        if activity.get("suppress_next_activity") and activity.get("player_id") == player.id:
+            activity["suppress_next_activity"] = False
+        else:
+            self._mark_valid_turn_input(player)
+            self.state.no_action_counts[player.id] = 0
+
+    def _finalize_no_action_for_turn(self, player, reason):
+        activity = self.state.turn_activity
+        if (
+            not player
+            or player.is_bot
+            or self.state.paused
+            or activity.get("player_id") != player.id
+            or activity.get("no_action_recorded")
+            or activity.get("server_error")
+            or activity.get("had_valid_user_input")
+        ):
+            return
+        activity["no_action_recorded"] = True
+        self._record_no_action(player, reason)
 
     def _record_no_action(self, player, reason):
         if self.state.paused:
@@ -2823,6 +3084,66 @@ class GameEngine:
         deadline = step.get("deadline_at")
         return bool(step.get("user_input_required") and deadline is not None and monotonic() >= deadline)
 
+    def _presentation_timed_out(self):
+        step = self.state.turn_step or {}
+        deadline = step.get("presentation_deadline_at")
+        return bool(step and not step.get("user_input_required") and deadline is not None and monotonic() >= deadline)
+
+    def _handle_presentation_timeout(self):
+        step = self.state.turn_step or {}
+        player = self.current_player()
+        if not player or step.get("player_id") != player.id:
+            return
+        self._log("turn_step", "presentation_timeout", {
+            "turn_id": step.get("turn_id"),
+            "player_id": player.id,
+            "step_id": step.get("step_id"),
+            "step_sequence": step.get("step_sequence"),
+        })
+        self.complete_turn_presentation(player.id, step.get("step_sequence"))
+
+    def recover_turn_deadlocks(self):
+        recovered = False
+        now = monotonic()
+        pause = self.state.event_timer_pause
+        if pause and self.state.phase == "active" and not self.state.paused and not self.state.ended:
+            player = self._find_player(pause.get("player_id"))
+            occurrence_valid = bool(player and any(
+                item["occurrence_id"] == pause.get("occurrence_id")
+                for item in self._visible_event_occurrences(player)
+            ))
+            step = self.state.turn_step or {}
+            wrong_turn = bool(pause.get("turn_id") and pause.get("turn_id") != step.get("turn_id"))
+            wrong_step = pause.get("reason") == "event_acknowledgement" and step.get("step_id") != "EVENT_CONFIRMATION"
+            expired = now - pause.get("started_at", now) > self.turn_timer_service.event_pause_ttl_seconds(pause)
+            if not occurrence_valid or wrong_turn or wrong_step or expired:
+                self.event_presentation_service.finish(
+                    pause.get("player_id"), pause.get("occurrence_id"), pause.get("token"), "watchdog"
+                )
+                self._log("turn_step", "deadlock_recovered", {
+                    "kind": "event_timer_pause",
+                    "occurrence_valid": occurrence_valid,
+                    "wrong_turn": wrong_turn,
+                    "wrong_step": wrong_step,
+                    "expired": expired,
+                })
+                recovered = True
+        step = self.state.turn_step or {}
+        current = self.current_player()
+        if current and step.get("player_id") and step.get("player_id") != current.id and self.state.phase == "active":
+            self._set_turn_step("ROLL_DECISION", "watchdog_step_player_mismatch", player_id=current.id)
+            self._log("turn_step", "deadlock_recovered", {"kind": "step_player_mismatch"})
+            recovered = True
+        if step.get("user_input_required") and step.get("deadline_at") is None and not self.state.config.fast_simulation:
+            duration = self._step_duration(step.get("step_id"))
+            if duration is not None:
+                step["deadline_at"] = now + duration
+                self._log("turn_step", "deadlock_recovered", {"kind": "missing_deadline", "step_id": step.get("step_id")})
+                recovered = True
+        if recovered:
+            self.mark_state_changed()
+        return recovered
+
     def _turn_total_timed_out(self):
         remaining = self.turn_total_remaining_seconds()
         return remaining is not None and remaining <= 0
@@ -2841,19 +3162,16 @@ class GameEngine:
         self.state.last_step_timeout = {
             "turn_id": step.get("turn_id"), "player_id": player.id, "step_id": step_id,
             "step_sequence": step.get("step_sequence"), "automatic_action": automatic_action,
-            "message": f"{step.get('label', step_id)} 시간이 끝나 기본 행동을 적용했습니다.",
+            "message": self.turn_timer_service.timeout_message(step_id),
         }
-        if step_id == "EVENT_CONFIRMATION":
-            self._record_activity(player)
-        else:
-            self._record_no_action(player, f"step_timeout:{step_id}")
-        timeout_count = self.state.no_action_counts.get(player.id, 0)
-        if player.status == "exited":
-            self._finish_turn(player.id)
-            return
+        activity = self.state.turn_activity
+        if activity.get("player_id") == player.id:
+            activity["step_timeout_count"] = int(activity.get("step_timeout_count", 0)) + 1
+            activity.setdefault("automatic_actions", []).append(automatic_action)
+            activity["suppress_next_activity"] = True
         if step_id == "ROLL_DECISION":
             self.roll_dice(player.id)
-            self.state.no_action_counts[player.id] = timeout_count
+            activity["suppress_next_activity"] = False
         elif step_id in {"LAND_PURCHASE_DECISION", "SPECIAL_PURCHASE_DECISION", "BUILD_DECISION", "BUILD_TYPE_SELECTION", "BUILD_CONFIRMATION"}:
             self.decline_pending_action(player.id)
             self.complete_turn_presentation(player.id)
@@ -2863,6 +3181,7 @@ class GameEngine:
             visible = [item for item in self._visible_event_occurrences(player) if item["occurrence_id"] not in self.state.event_acknowledged_occurrences.get(player.id, set())]
             if visible:
                 self.acknowledge_events(player.id, len(self.state.event_history), visible[0]["occurrence_id"])
+            activity["suppress_next_activity"] = False
             self._set_turn_step("TURN_END_DECISION", "event_timeout_acknowledged", player_id=player.id)
         elif step_id == "BANKRUPTCY_TAKEOVER" and self.state.pending_land_takeover:
             self.respond_land_takeover(player.id, False)
@@ -2883,7 +3202,6 @@ class GameEngine:
             "step_sequence": step.get("step_sequence"), "automatic_action": "finish_turn",
             "message": "턴 전체 선택시간 상한에 도달해 턴을 자동 종료했습니다.",
         }
-        self._record_no_action(player, "turn_total_timeout")
         self.state.pending_action = None
         self.state.land_trade_offer = None
         self.state.operating_right_offer = None

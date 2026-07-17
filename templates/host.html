@@ -53,7 +53,6 @@
           </div>
           <details class="advanced-settings">
             <summary>단계 시간·봇 고급 설정</summary>
-            <input id="turnLimit" type="hidden" value="30">
             <label>단계 시간 프리셋
               <select id="stepTimePreset">
                 <option value="fast">빠름</option><option value="default" selected>기본</option>
@@ -61,9 +60,10 @@
                 <option value="unlimited">시간 제한 없음</option>
               </select>
             </label>
-            <label>턴 전체 선택시간 상한
-              <select id="turnTotalLimit"><option value="60">60초</option><option value="120" selected>120초</option><option value="180">180초</option><option value="unlimited">없음</option></select>
+            <label>전체 선택시간 상한
+              <select id="turnTotalLimit"><option value="60">60초</option><option value="90" selected>90초</option><option value="150">150초</option><option value="unlimited">없음</option></select>
             </label>
+            <p class="panel-note">사용자 입력 단계에서만 줄어드는 상한입니다. 서버 처리와 연출은 선택시간을 소모하지 않습니다.</p>
             <label>단계별 재접속 유예
               <select id="reconnectGrace"><option value="0" selected>사용 안 함</option><option value="5">5초·단계당 1회</option><option value="10">10초·단계당 1회</option></select>
             </label>
@@ -71,13 +71,13 @@
               <label>주사위 <input data-step-limit="ROLL_DECISION" type="number" min="5" max="120" value="15"></label>
               <label>토지 구매 <input data-step-limit="LAND_PURCHASE_DECISION" type="number" min="5" max="120" value="15"></label>
               <label>특수지역 구매 <input data-step-limit="SPECIAL_PURCHASE_DECISION" type="number" min="5" max="120" value="15"></label>
-              <label>건설 여부 <input data-step-limit="BUILD_DECISION" type="number" min="5" max="120" value="20"></label>
-              <label>건물 유형 <input data-step-limit="BUILD_TYPE_SELECTION" type="number" min="5" max="120" value="20"></label>
-              <label>건설 확인 <input data-step-limit="BUILD_CONFIRMATION" type="number" min="5" max="120" value="20"></label>
+              <label>건설 전체 <input data-step-limit="BUILD_DECISION" type="number" min="5" max="120" value="25"></label>
               <label>관리 <input data-step-limit="MANAGEMENT_DECISION" type="number" min="5" max="120" value="25"></label>
               <label>거래 작성 <input data-step-limit="TRADE_CONFIGURATION" type="number" min="5" max="120" value="30"></label>
-              <label>턴 종료 <input data-step-limit="TURN_END_DECISION" type="number" min="5" max="120" value="10"></label>
+              <label>이벤트 확인 <input data-step-limit="EVENT_CONFIRMATION" type="number" min="5" max="120" value="20"></label>
+              <label>턴 종료 <input data-step-limit="TURN_END_DECISION" type="number" min="5" max="120" value="8"></label>
             </div>
+            <p class="panel-note">결과 요약은 자동 표현 단계입니다. 공식 규칙 고정 · 거래/승인 응답 10초</p>
             <label>봇 지연
               <select id="botDelay">
                 <option value="0">즉시</option>

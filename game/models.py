@@ -69,12 +69,14 @@ class HostConfig:
     slot_types: list[str] = field(default_factory=lambda: ["human", "bot"])
     bot_strategies: list[str] = field(default_factory=lambda: ["balanced", "balanced"])
     total_rounds: int = 10
-    turn_limit_seconds: int | None = 30
+    # Deprecated lobby-era per-turn timer. New turn flow uses step timers plus
+    # turn_total_limit_seconds as the accumulated user-input cap.
+    legacy_turn_limit_seconds: int | None = 30
     bot_action_delay: float = 1
     fast_simulation: bool = False
     step_time_preset: str = "default"
     step_time_limits: dict[str, int | None] = field(default_factory=dict)
-    turn_total_limit_seconds: int | None = 120
+    turn_total_limit_seconds: int | None = 90
     reconnect_grace_seconds: int = 0
 
     def normalize(self):
@@ -105,6 +107,7 @@ class GameState:
     turn_step: dict | None = None
     turn_step_sequence: int = 0
     turn_total_input_elapsed: float = 0
+    turn_activity: dict = field(default_factory=dict)
     turn_step_history: list = field(default_factory=list)
     last_step_timeout: dict | None = None
     step_reconnect_graces: set = field(default_factory=set)
@@ -183,6 +186,7 @@ class GameState:
         self.turn_step = None
         self.turn_step_sequence = 0
         self.turn_total_input_elapsed = 0
+        self.turn_activity.clear()
         self.turn_step_history.clear()
         self.last_step_timeout = None
         self.step_reconnect_graces.clear()
