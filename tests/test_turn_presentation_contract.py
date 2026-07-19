@@ -19,7 +19,7 @@ def test_turn_presentation_has_explicit_ordered_scenes_and_state_lock():
     ):
         assert f'{phase}: "{phase}"' in script
     assert "turnPresentationState" in script
-    assert "presentationLocked = turnPresentationState.inputLocked" in script
+    assert "presentationLocked = hasBlockingPresentationForCurrentTurn()" in script
     assert "await syncPresentationSnapshot(result.action_id)" in script
 
 
@@ -49,5 +49,40 @@ def test_result_summary_and_development_timeline_are_exposed():
 def test_observed_opponent_dice_animation_releases_presentation_lock():
     script, _ = sources()
     assert 'animationController.enqueue("dice", incomingRoll.action_id, async () => {' in script
-    assert "await playDiceSequence(incomingRoll);" in script
-    assert "finishPresentation(incomingRoll.action_id);" in script
+    assert "await playDiceSequence(incomingRoll, { identity: rollIdentity, blocking: identityMatchesCurrentTurn(rollIdentity) });" in script
+    assert "finishPresentation(rollIdentity);" in script
+
+
+def test_snapshot_guard_compares_turn_and_step_sequence():
+    script, _ = sources()
+    assert "function isStaleSnapshot(snapshot)" in script
+    assert "snapshot.public.game_instance_id !== lastState.game_instance_id) return false" in script
+    assert "snapshotStepSequence(snapshot) <" in script
+
+
+def test_roll_button_is_not_blocked_by_global_animation_playing():
+    script, _ = sources()
+    assert "function hasBlockingAnimationForCurrentTurn()" in script
+    assert "button.disabled = clientLocked || !rule.allowed" in script
+    assert "button.disabled = actionInFlight || animationState.playing" not in script
+    assert "button.disabled = actionInFlight ||" not in script
+    assert "button.disabled = clientLocked || !rule.allowed" in script
+
+
+def test_economic_animation_is_non_blocking_and_identity_scoped():
+    script, _ = sources()
+    assert "const animationTasks = new Map()" in script
+    assert "function identityFromEconomicAction(action = {})" in script
+    assert 'animationController.enqueue("economic", action.action_id' in script
+    assert "{ identity, blocking: false, timeoutMs: 8000 }" in script
+    assert "runPresentationScene(presentationPhases.ECONOMIC_RESULT" in script
+    assert "{ identity, blocking: false }" in script
+
+
+def test_finish_presentation_uses_turn_identity_and_roll_convergence():
+    script, _ = sources()
+    assert "function finishPresentation(identityOrActionId)" in script
+    assert "identityMatchesCurrentTurn(identity)" in script
+    assert "function clearStaleLocksForRollSnapshot(snapshot)" in script
+    assert "function convergeCurrentRollDecision()" in script
+    assert "DEADLOCK_RECOVERED_CLIENT" in script

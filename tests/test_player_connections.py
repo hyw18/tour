@@ -60,8 +60,9 @@ def test_player_javascript_connects_every_existing_player_mutation_and_deduplica
         "/api/bankruptcy/takeover/respond",
     ):
         assert endpoint in source
-    assert "if (actionInFlight) return;" in source
-    assert "button.disabled = actionInFlight" in source
+    assert "hasBlockingRequestForCurrentTurn()" in source
+    assert "button.disabled = clientLocked || !rule.allowed" in source
+    assert "button.disabled = actionInFlight" not in source
     assert "special.initial_price_won" in source
     assert "state.special_region_details" in source
     assert "currentSpecial" not in source

@@ -1,8 +1,8 @@
 # TURN_PRESENTATION_AUDIT
 
-- 작업 전 커밋: `d0fa8bf2f4bfa7a5d99eeb35dbdda62c92123dd3`
+- 작업 전 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647`
 - 작업 후 커밋: `UNCOMMITTED_WORKTREE`
-- 테스트를 실제 실행한 커밋: `d0fa8bf2f4bfa7a5d99eeb35dbdda62c92123dd3` + working tree changes
+- 테스트를 실제 실행한 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647` + working tree changes
 - 브라우저 테스트를 실행한 커밋: `ATTEMPTED_SKIPPED_LIBNSPR4_MISSING`
 
 ## 서버 단계와 화면 장면
@@ -18,11 +18,17 @@
 | 행동 선택 | 구매, 건설, 관리, 거래, 이벤트 확인 |
 | 턴 마무리 | `TURN_END_DECISION`, `TURN_COMPLETE` |
 
-플레이어 상단 타이머는 `BUILD_CONFIRMATION` 같은 내부 단계명을 직접 표시하지 않고 `건물 건설`, `자산 관리`, `턴 마무리`처럼 묶은 이름을 표시한다. 진행 표시기 역시 건설 유형 선택과 건설 확인을 별도 칸으로 반복 표시하지 않는다.
+플레이어 상단 타이머는 `BUILD_CONFIRMATION` 같은 내부 단계명을 직접 표시하지 않고 `건물 건설`, `자산 관리`, `턴 마무리`처럼 묶은 이름을 표시한다. 진행 표시기는 서버가 실제로 내려준 단계만 표시하며, 클라이언트가 `TURN_END_DECISION`을 임의로 덧붙이지 않는다.
 
 ## 결과 확인 중복
 
-현재 서버는 `RESULT_CONFIRMATION`을 비입력 표현 단계로 유지한다. 단순 구매 포기/건설 포기는 timeout 또는 사용자 포기 후 `TURN_END_DECISION`으로 이어진다. 중요한 결과 확인을 한 뒤 다시 별도 종료를 누르게 하는 부분은 남아 있으나, 단순 결과는 사용자의 추가 확인 시간을 소비하지 않는다.
+현재 서버는 `RESULT_CONFIRMATION`을 비입력 표현 단계로 유지한다. 결과 표현 뒤 남은 행동이 턴 종료뿐이면 `complete_turn_presentation`이 즉시 다음 플레이어 턴으로 넘긴다. 따라서 비용 없는 칸, 구매 포기, 건설 포기, 출발지 정산, 방문료 처리처럼 추가 선택지가 없는 흐름은 별도 "턴 종료" 클릭을 요구하지 않는다.
+
+서버 공개 상태의 `turn_completion_policy`는 현재 단계가 `auto_end`, `manual_end`, `continue_to_decision` 중 어떤 종료 정책인지 알려준다. `MANAGEMENT_DECISION`처럼 실제 추가 행동이 가능한 단계에서만 수동 종료 버튼이 허용된다.
+
+## 최신 스냅샷 보호
+
+플레이어 클라이언트는 `game_instance_id`, `state_version`, `turn_sequence`, `step_sequence`를 비교해 오래된 snapshot을 렌더링하지 않는다. 이전 턴 또는 이전 단계 응답이 늦게 도착해도 최신 턴의 주사위 버튼 상태를 덮어쓰지 않도록 보호한다.
 
 ## Timeout 안내
 

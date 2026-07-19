@@ -1,9 +1,9 @@
 # TURN_STEP_TIMER_AUDIT
 
-- 작업 전 커밋: `d0fa8bf2f4bfa7a5d99eeb35dbdda62c92123dd3`
+- 작업 전 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647`
 - 작업 후 커밋: `UNCOMMITTED_WORKTREE`
-- 테스트를 실제 실행한 커밋: `d0fa8bf2f4bfa7a5d99eeb35dbdda62c92123dd3` + working tree changes
-- 브라우저 테스트를 실행한 커밋: `NOT_RUN_NODE_NOT_INSTALLED`
+- 테스트를 실제 실행한 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647` + working tree changes
+- 브라우저 테스트를 실행한 커밋: `ATTEMPTED_SKIPPED_LIBNSPR4_MISSING`
 
 ## 결론
 
@@ -19,9 +19,9 @@
 | 관리 | `MANAGEMENT_DECISION` | 25초 |
 | 거래 작성 | `TRADE_CONFIGURATION` | 30초 |
 | 이벤트 확인 | `EVENT_CONFIRMATION` | 20초 |
-| 턴 마무리 | `TURN_END_DECISION` | 8초 |
+| 턴 마무리 | `TURN_END_DECISION` | 8초, legacy/fallback only |
 
-건설 모달의 유형 변경, 미리보기, 최종 확인은 같은 `step_sequence` 안의 `client_substep`으로만 기록된다. 같은 모달을 다시 열어도 deadline은 초기화되지 않는다.
+건설 모달의 유형 변경, 미리보기, 최종 확인은 같은 `step_sequence` 안의 `client_substep`으로만 기록된다. 같은 모달을 다시 열어도 deadline은 초기화되지 않는다. 추가 행동이 남아 있지 않은 표현 단계는 `TURN_END_DECISION`을 새 입력 단계로 만들지 않고 `_finish_turn`으로 바로 다음 플레이어의 `ROLL_DECISION`을 연다.
 
 ## Timeout과 무조작 턴
 
@@ -46,9 +46,9 @@ last_valid_input_at
 
 ## 검증
 
-- `.venv/bin/python -m pytest -q`: 226 passed, 1 skipped
+- `.venv/bin/python -m pytest -q`: 237 passed, 1 skipped
 - `.venv/bin/ruff check .`: passed
 - `.venv/bin/flask --app app routes`: passed
-- `python -m compileall .`: system `python` not installed
+- `.venv/bin/python -m compileall game tests static`: passed
 - `node --check static/js/*.js`: `node` not installed
 - `.venv/bin/python -m pytest tests/test_player_browser.py -q -rs`: skipped, Chromium dependency `libnspr4.so` missing

@@ -86,15 +86,15 @@ def test_refresh_does_not_create_duplicate_step_or_reset_time():
 
 
 def test_purchase_and_build_timeouts_decline_without_automatic_construction():
-    engine, first, _ = started()
+    engine, first, second = started()
     arrive_at_unowned_land(engine, first["id"])
     engine.state.turn_step["deadline_at"] = 0
     engine.advance_automation()
     assert engine.state.pending_action is None
     assert "gimcheon" not in engine.state.land_ownership
-    assert engine.state.turn_step["step_id"] == "TURN_END_DECISION"
+    assert engine.current_player().id == second["id"]
+    assert engine.state.turn_step["step_id"] == "ROLL_DECISION"
 
-    engine.force_end_current_turn()
     engine.force_end_current_turn()
     engine.create_land_ownership(first["id"], "gimcheon")
     engine.set_player_position(first["id"], 0)
@@ -205,13 +205,13 @@ def test_three_step_timeouts_in_one_turn_count_as_one_inactive_turn_only_at_turn
 
 def test_step_timeout_then_direct_user_input_is_not_inactive_turn():
     engine, first, _ = started()
+    engine.set_forced_dice(1)
     engine.state.turn_step["deadline_at"] = 0
     engine.advance_automation()
     engine.complete_turn_presentation(first["id"])
-    if engine.state.pending_action:
-        engine.decline_pending_action(first["id"])
-        engine.complete_turn_presentation(first["id"])
-    engine.end_turn(first["id"])
+    assert engine.state.pending_action
+    engine.decline_pending_action(first["id"])
+    engine.complete_turn_presentation(first["id"])
     assert engine.state.no_action_counts.get(first["id"], 0) == 0
 
 
@@ -234,3 +234,61 @@ def test_three_fully_inactive_turns_auto_exit_player():
             engine.force_end_current_turn()
     assert engine._find_player(first["id"]).status == "exited"
     assert engine.current_player().id in {second["id"], first["id"]}
+
+
+def test_no_action_arrival_auto_ends_without_turn_end_decision():
+    engine, first, second = started(fast=True)
+    engine.set_player_position(first["id"], 4)
+    engine.set_forced_dice(6)
+    engine.roll_dice(first["id"])
+    assert engine.state.turn_step["step_id"] == "ARRIVAL_PRESENTATION"
+
+    engine.complete_turn_presentation(first["id"])
+
+    assert engine.current_player().id == second["id"]
+    assert engine.state.turn_step["step_id"] == "ROLL_DECISION"
+    roll_action = engine.player_private_state(second["id"])["allowed_actions"]["roll"]
+    assert roll_action["allowed"] is True
+    assert roll_action["turn_id"] == engine.state.turn_step["turn_id"]
+    assert roll_action["turn_sequence"] == engine.state.turn_sequence
+    assert roll_action["step_sequence"] == engine.state.turn_step["step_sequence"]
+
+
+def test_purchase_decline_auto_ends_after_result_presentation():
+    engine, first, second = started(fast=True)
+    arrive_at_unowned_land(engine, first["id"])
+    engine.decline_pending_action(first["id"])
+    assert engine.state.turn_step["step_id"] == "RESULT_CONFIRMATION"
+
+    engine.complete_turn_presentation(first["id"])
+
+    assert engine.current_player().id == second["id"]
+    assert engine.state.turn_step["step_id"] == "ROLL_DECISION"
+
+
+def test_economic_action_carries_turn_identity_for_client_lock_scoping():
+    engine, first, _ = started(fast=True)
+    arrive_at_unowned_land(engine, first["id"])
+    before = engine.economic_snapshot()
+    engine.purchase_land(first["id"])
+    action = engine.record_economic_action("land_purchase", first["id"], before, {"region_id": "gimcheon"})
+
+    assert action["game_instance_id"] == engine.state.game_instance_id
+    assert action["turn_id"] == engine.state.turn_step["turn_id"]
+    assert action["turn_sequence"] == engine.state.turn_sequence
+    assert action["step_sequence"] == engine.state.turn_step["step_sequence"]
+
+
+def test_owned_land_management_keeps_manual_end_available():
+    engine, first, _ = started(fast=True)
+    engine.create_land_ownership(first["id"], "gimcheon")
+    engine.set_forced_dice(1)
+    engine.roll_dice(first["id"])
+    engine.complete_turn_presentation(first["id"])
+    engine.decline_pending_action(first["id"])
+    engine.complete_turn_presentation(first["id"])
+
+    private = engine.player_private_state(first["id"])
+    assert engine.state.turn_step["step_id"] == "MANAGEMENT_DECISION"
+    assert private["allowed_actions"]["end_turn"]["allowed"] is True
+    assert private["allowed_actions"]["end_turn"]["automatic"] is False

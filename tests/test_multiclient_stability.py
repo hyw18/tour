@@ -198,12 +198,77 @@ def test_four_independent_clients_complete_thirty_rounds_without_server_error():
             decline = post(client, "/api/decline-action", {"player_id": player_id}, f"decline-{turn}", game_id)
             assert decline.status_code == 200
             post(client, "/api/turn-step/presentation-complete", {"player_id": player_id}, f"decline-complete-{turn}", game_id)
-        end = post(client, "/api/end-turn", {"player_id": player_id}, f"end-{turn}", game_id)
-        assert end.status_code == 200
+        private = client.get(f"/api/player/{player_id}/private").get_json()
+        if private["allowed_actions"]["end_turn"]["allowed"]:
+            end = post(client, "/api/end-turn", {"player_id": player_id}, f"end-{turn}", game_id)
+            assert end.status_code == 200
 
     final = host.get("/api/host/state").get_json()
     assert final["ended"] is True
     assert len(final["players"]) == 4
+
+
+def test_three_hundred_server_turns_never_leave_current_player_roll_disabled():
+    app = create_app({"TESTING": True})
+    host, csrf = host_login(app)
+    response = post(
+        host,
+        "/api/config",
+        {
+            "total_slots": 4,
+            "slot_types": ["human", "human", "human", "human"],
+            "total_rounds": 300,
+            "fast_simulation": True,
+            "bot_action_delay": 0,
+        },
+        "config-300",
+        csrf=csrf,
+    )
+    assert response.status_code == 200
+    game_id = response.get_json()["game_instance_id"]
+    players = [player for _, player in join_players(app, 4, game_id)]
+    assert post(host, "/api/start", {}, "start-300", game_id, csrf).status_code == 200
+    engine = app.config["GAME_ENGINE"]
+
+    blocked = []
+    for turn in range(300):
+        current_id = engine.current_player().id
+        private = engine.player_private_state(current_id)
+        roll = private["allowed_actions"]["roll"]
+        if not roll["allowed"]:
+            blocked.append({
+                "turn": turn,
+                "current_id": current_id,
+                "roll": roll,
+                "debug": engine.debug_turn_state(),
+            })
+            break
+        engine.set_forced_dice((turn % 6) + 1)
+        engine.roll_dice(current_id)
+        engine.complete_turn_presentation(current_id)
+        for _ in range(8):
+            if engine.current_player().id != current_id:
+                break
+            current_private = engine.player_private_state(current_id)
+            if engine.state.pending_action and current_private["allowed_actions"]["decline_action"]["allowed"]:
+                engine.decline_pending_action(current_id)
+                engine.complete_turn_presentation(current_id)
+                continue
+            pending_events = current_private.get("pending_event_occurrences") or []
+            if pending_events:
+                engine.acknowledge_events(current_id, len(engine.state.event_history), pending_events[0]["occurrence_id"])
+                engine.complete_turn_presentation(current_id)
+                continue
+            if current_private["allowed_actions"]["end_turn"]["allowed"]:
+                engine.end_turn(current_id)
+                continue
+            if not (engine.state.turn_step or {}).get("user_input_required"):
+                engine.complete_turn_presentation(current_id)
+                continue
+            break
+
+    assert blocked == []
+    assert {player["id"] for player in players}
 
 
 def test_one_hundred_concurrent_roll_purchase_build_and_trade_accept_execute_once():

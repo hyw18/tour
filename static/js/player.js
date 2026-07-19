@@ -28,8 +28,14 @@ const animationState = {
   sequenceId: null,
   playing: false,
   skippable: true,
-  startedAt: null
+  startedAt: null,
+  token: null,
+  blocking: false,
+  turnId: null,
+  turnSequence: null,
+  stepSequence: null
 };
+const animationTasks = new Map();
 const presentationPhases = Object.freeze({
   ACTION_REQUEST: "ACTION_REQUEST", DICE_REVEAL: "DICE_REVEAL",
   PIECE_MOVEMENT: "PIECE_MOVEMENT", ARRIVAL_REVEAL: "ARRIVAL_REVEAL",
@@ -43,11 +49,19 @@ const turnPresentationState = {
   stateVersion: null,
   inputLocked: false,
   lockReason: "",
-  canSkip: false
+  canSkip: false,
+  token: null,
+  gameInstanceId: null,
+  turnId: null,
+  turnSequence: null,
+  stepSequence: null,
+  blocking: false
 };
 window.turnPresentationState = turnPresentationState;
+window.animationTasks = animationTasks;
 const presentationMetrics = new Map();
 window.turnPerformanceLog = [];
+let requestLockIdentity = null;
 
 function presentationMetric(actionId) {
   if (!presentationMetrics.has(actionId)) {
@@ -65,14 +79,89 @@ function scaledPresentationMs(milliseconds) {
   return Math.round(milliseconds * presentationScale());
 }
 
-function setPresentationPhase(phase, { actionId = turnPresentationState.actionId, locked = true, reason = "결과를 표시하는 중입니다.", canSkip = true } = {}) {
-  Object.assign(turnPresentationState, { phase, actionId, inputLocked: locked, lockReason: locked ? reason : "", canSkip });
+function currentTurnIdentity() {
+  const step = lastPrivate?.turn_step || lastState?.turn_step || {};
+  return {
+    token: step.turn_id ? `${lastState?.game_instance_id || "game"}:${step.turn_id}:${step.step_sequence ?? "step"}` : null,
+    gameInstanceId: lastState?.game_instance_id || null,
+    turnId: step.turn_id || null,
+    turnSequence: lastState?.turn_sequence ?? null,
+    stepSequence: step.step_sequence ?? null,
+  };
+}
+
+function normalizeIdentity(identity = {}) {
+  const current = currentTurnIdentity();
+  return {
+    token: identity.token || current.token || `lock-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    gameInstanceId: identity.gameInstanceId ?? identity.game_instance_id ?? current.gameInstanceId,
+    turnId: identity.turnId ?? identity.turn_id ?? current.turnId,
+    turnSequence: identity.turnSequence ?? identity.turn_sequence ?? current.turnSequence,
+    stepSequence: identity.stepSequence ?? identity.step_sequence ?? current.stepSequence,
+    actionId: identity.actionId ?? identity.action_id ?? null,
+  };
+}
+
+function identityFromRoll(result = {}) {
+  return normalizeIdentity({
+    gameInstanceId: result.game_instance_id || lastState?.game_instance_id,
+    turnSequence: result.turn_sequence,
+    actionId: result.action_id,
+  });
+}
+
+function identityFromEconomicAction(action = {}) {
+  return normalizeIdentity({
+    gameInstanceId: action.game_instance_id,
+    turnId: action.turn_id,
+    turnSequence: action.turn_sequence,
+    stepSequence: action.step_sequence,
+    actionId: action.action_id,
+  });
+}
+
+function identityMatchesCurrentTurn(identity) {
+  if (!identity) return false;
+  const current = currentTurnIdentity();
+  if (identity.gameInstanceId && current.gameInstanceId && identity.gameInstanceId !== current.gameInstanceId) return false;
+  if (identity.turnId && current.turnId) return identity.turnId === current.turnId;
+  if (identity.turnSequence != null && current.turnSequence != null) return identity.turnSequence === current.turnSequence;
+  return false;
+}
+
+function snapshotRollReady(snapshot) {
+  const state = snapshot?.public;
+  const privateData = snapshot?.private;
+  const step = privateData?.turn_step || state?.turn_step;
+  return Boolean(
+    state?.current_turn_player_id === playerId
+    && step?.step_id === "ROLL_DECISION"
+    && step?.player_id === playerId
+    && privateData?.allowed_actions?.roll?.allowed
+  );
+}
+
+function setPresentationPhase(phase, { actionId = turnPresentationState.actionId, locked = true, reason = "결과를 표시하는 중입니다.", canSkip = true, identity = null, blocking = locked } = {}) {
+  const normalized = normalizeIdentity({ ...(identity || {}), actionId });
+  Object.assign(turnPresentationState, {
+    phase,
+    actionId,
+    inputLocked: locked,
+    lockReason: locked ? reason : "",
+    canSkip,
+    token: locked ? normalized.token : null,
+    gameInstanceId: locked ? normalized.gameInstanceId : null,
+    turnId: locked ? normalized.turnId : null,
+    turnSequence: locked ? normalized.turnSequence : null,
+    stepSequence: locked ? normalized.stepSequence : null,
+    blocking: locked && blocking,
+  });
   renderActionState();
   if (locked) $("#disabledActionHelp").textContent = reason;
 }
 
-async function runPresentationScene(phase, actionId, minimumMs, reason, task = null) {
-  setPresentationPhase(phase, { actionId, locked: true, reason, canSkip: true });
+async function runPresentationScene(phase, actionId, minimumMs, reason, task = null, options = {}) {
+  setPresentationPhase(phase, { actionId, locked: true, reason, canSkip: true, identity: options.identity, blocking: options.blocking ?? true });
   const metric = presentationMetric(actionId);
   metric.scene_order ||= [];
   metric.scene_order.push(phase);
@@ -83,9 +172,16 @@ async function runPresentationScene(phase, actionId, minimumMs, reason, task = n
   metric[`${phase.toLowerCase()}_ms`] = Math.round(performance.now() - started);
 }
 
-function finishPresentation(actionId) {
+function finishPresentation(identityOrActionId) {
+  const identity = typeof identityOrActionId === "object"
+    ? normalizeIdentity(identityOrActionId)
+    : normalizeIdentity({ actionId: identityOrActionId });
+  const actionId = identity.actionId;
+  if (turnPresentationState.inputLocked && !identityMatchesCurrentTurn(identity) && turnPresentationState.token !== identity.token) {
+    return;
+  }
   const phase = lastState?.current_turn_player_id === playerId ? presentationPhases.PLAYER_DECISION : presentationPhases.TURN_COMPLETE;
-  setPresentationPhase(phase, { actionId, locked: false, reason: "", canSkip: false });
+  setPresentationPhase(phase, { actionId, locked: false, reason: "", canSkip: false, identity });
   const metric = presentationMetric(actionId);
   metric.dice_animation_ms ??= metric.dice_reveal_ms || 0;
   metric.movement_ms ??= metric.piece_movement_ms || 0;
@@ -97,6 +193,136 @@ function finishPresentation(actionId) {
   window.turnPerformanceLog = window.turnPerformanceLog.slice(-30);
   if (document.body.dataset.appMode === "development") console.info(JSON.stringify(metric));
   if (presentationMetrics.size > 30) presentationMetrics.delete(presentationMetrics.keys().next().value);
+}
+
+function currentRollServerAllowed() {
+  const step = lastPrivate?.turn_step;
+  return Boolean(
+    lastState?.current_turn_player_id === playerId
+    && step?.step_id === "ROLL_DECISION"
+    && step?.player_id === playerId
+    && action("roll").allowed
+  );
+}
+
+function hasBlockingAnimationForCurrentTurn() {
+  return [...animationTasks.values()].some((task) => (
+    task.blocking
+    && task.status === "running"
+    && identityMatchesCurrentTurn(task)
+  ));
+}
+
+function hasBlockingRequestForCurrentTurn() {
+  return Boolean(actionInFlight && (!requestLockIdentity || identityMatchesCurrentTurn(requestLockIdentity)));
+}
+
+function hasBlockingPresentationForCurrentTurn() {
+  return Boolean(
+    turnPresentationState.inputLocked
+    && turnPresentationState.blocking
+    && identityMatchesCurrentTurn(turnPresentationState)
+  );
+}
+
+function rollClientBlockReason() {
+  if (hasBlockingRequestForCurrentTurn()) return "CLIENT: BLOCKING_REQUEST";
+  if (hasBlockingPresentationForCurrentTurn()) return "CLIENT: REQUIRED_PRESENTATION";
+  if (hasBlockingAnimationForCurrentTurn()) return "CLIENT: BLOCKING_ANIMATION";
+  if (!action("roll").allowed) return `SERVER: ${action("roll").reason_code || "DISALLOWED"}`;
+  return "";
+}
+
+function clearStaleLocksForRollSnapshot(snapshot) {
+  if (!snapshotRollReady(snapshot)) return false;
+  let recovered = false;
+  if (actionInFlight && (!requestLockIdentity || !identityMatchesCurrentTurn(requestLockIdentity))) {
+    actionInFlight = false;
+    recovered = true;
+  }
+  requestLockIdentity = null;
+  if (animationController.currentCancel && !identityMatchesCurrentTurn(animationState)) {
+    animationController.currentCancel();
+    animationController.currentCancel = null;
+    recovered = true;
+  }
+  animationController.queue = animationController.queue.filter((item) => {
+    const keep = item.blocking && identityMatchesCurrentTurn(item);
+    if (!keep) {
+      animationTasks.delete(item.token);
+      item.resolve?.();
+      recovered = true;
+    }
+    return keep;
+  });
+  for (const [token, task] of animationTasks.entries()) {
+    if (task.blocking && !identityMatchesCurrentTurn(task)) {
+      animationTasks.delete(token);
+      recovered = true;
+    }
+  }
+  if (turnPresentationState.inputLocked && !identityMatchesCurrentTurn(turnPresentationState)) {
+    setPresentationPhase(presentationPhases.PLAYER_DECISION, { actionId: turnPresentationState.actionId, locked: false, reason: "", canSkip: false });
+    recovered = true;
+  }
+  if (animationState.playing && !hasBlockingAnimationForCurrentTurn()) {
+    Object.assign(animationState, { type: null, sequenceId: null, playing: false, startedAt: null, token: null, blocking: false, turnId: null, turnSequence: null, stepSequence: null });
+    hideAnimationOverlay();
+    recovered = true;
+  }
+  if (!buildConfirmModal.hidden && lastPrivate?.turn_step?.step_id !== "BUILD_DECISION") {
+    buildConfirmModal.hidden = true;
+    activeBuildPreview = null;
+    recovered = true;
+  }
+  if (!$("#actionConfirmModal").hidden) {
+    $("#actionConfirmModal").hidden = true;
+    pendingConfirmedAction = null;
+    recovered = true;
+  }
+  if (recovered) {
+    console.warn("DEADLOCK_RECOVERED_CLIENT", {
+      current_turn_player_id: snapshot.public.current_turn_player_id,
+      turn_id: snapshot.private?.turn_step?.turn_id,
+      turn_sequence: snapshot.public.turn_sequence,
+      step_sequence: snapshot.private?.turn_step?.step_sequence,
+    });
+  }
+  return recovered;
+}
+
+function convergeCurrentRollDecision() {
+  if (!currentRollServerAllowed()) return false;
+  let recovered = false;
+  if (actionInFlight && (!requestLockIdentity || !identityMatchesCurrentTurn(requestLockIdentity))) {
+    actionInFlight = false;
+    recovered = true;
+  }
+  requestLockIdentity = null;
+  if (turnPresentationState.inputLocked && !identityMatchesCurrentTurn(turnPresentationState)) {
+    setPresentationPhase(presentationPhases.PLAYER_DECISION, { actionId: turnPresentationState.actionId, locked: false, reason: "", canSkip: false });
+    recovered = true;
+  }
+  if (animationState.playing && !hasBlockingAnimationForCurrentTurn()) {
+    Object.assign(animationState, { type: null, sequenceId: null, playing: false, startedAt: null, token: null, blocking: false, turnId: null, turnSequence: null, stepSequence: null });
+    hideAnimationOverlay();
+    recovered = true;
+  }
+  for (const [token, task] of animationTasks.entries()) {
+    if (task.blocking && !identityMatchesCurrentTurn(task)) {
+      animationTasks.delete(token);
+      recovered = true;
+    }
+  }
+  if (recovered) {
+    console.warn("DEADLOCK_RECOVERED_CLIENT", {
+      turn_id: lastPrivate?.turn_step?.turn_id,
+      turn_sequence: lastState?.turn_sequence,
+      step_sequence: lastPrivate?.turn_step?.step_sequence,
+      reason: "stale_lock_on_roll_decision",
+    });
+  }
+  return recovered;
 }
 
 const $ = (selector) => document.querySelector(selector);
@@ -153,16 +379,35 @@ class AnimationSequenceController {
     this.currentCancel = null;
   }
 
-  enqueue(type, sequenceId, task) {
+  enqueue(type, sequenceId, task, options = {}) {
     return new Promise((resolve) => {
       if (this.queue.length >= 10 && type === "dice") {
         const expendableIndex = this.queue.findIndex((item) => item.type === "dice");
         if (expendableIndex >= 0) {
           const [compressed] = this.queue.splice(expendableIndex, 1);
+          animationTasks.delete(compressed.token);
           compressed.resolve();
         }
       }
-      this.queue.push({ type, sequenceId, task, resolve });
+      const identity = normalizeIdentity(options.identity || {});
+      const token = options.token || `${type}:${sequenceId}:${identity.turnSequence ?? "na"}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+      const item = {
+        type,
+        sequenceId,
+        task,
+        resolve,
+        token,
+        actionId: sequenceId,
+        gameInstanceId: identity.gameInstanceId,
+        turnId: identity.turnId,
+        turnSequence: identity.turnSequence,
+        stepSequence: identity.stepSequence,
+        blocking: options.blocking ?? type !== "economic",
+        status: "queued",
+        timeoutMs: options.timeoutMs ?? (type === "event" ? 15000 : type === "economic" ? 8000 : 5000),
+      };
+      animationTasks.set(token, item);
+      this.queue.push(item);
       this.drain();
     });
   }
@@ -174,22 +419,43 @@ class AnimationSequenceController {
       const item = this.queue.shift();
       this.skipRequested = false;
       this.cancelled = false;
+      item.status = "running";
+      animationTasks.set(item.token, item);
       Object.assign(animationState, {
         type: item.type,
         sequenceId: item.sequenceId,
         playing: true,
-        startedAt: Date.now()
+        startedAt: Date.now(),
+        token: item.token,
+        blocking: item.blocking,
+        turnId: item.turnId,
+        turnSequence: item.turnSequence,
+        stepSequence: item.stepSequence
       });
       renderActionState();
       try {
-        await item.task();
+        await Promise.race([
+          item.task(),
+          new Promise((_, reject) => window.setTimeout(() => {
+            const error = new Error(`${item.type} animation timed out`);
+            error.name = "AnimationTimeout";
+            reject(error);
+          }, item.timeoutMs))
+        ]);
       } catch (error) {
         if (error.name !== "AnimationCancelled") console.error("Animation sequence failed", error);
       } finally {
+        item.status = "finished";
+        animationTasks.delete(item.token);
         item.resolve();
+        if (animationState.token === item.token) {
+          Object.assign(animationState, { type: null, sequenceId: null, playing: false, startedAt: null, token: null, blocking: false, turnId: null, turnSequence: null, stepSequence: null });
+          hideAnimationOverlay();
+          renderActionState();
+        }
       }
     }
-    Object.assign(animationState, { type: null, sequenceId: null, playing: false, startedAt: null });
+    Object.assign(animationState, { type: null, sequenceId: null, playing: false, startedAt: null, token: null, blocking: false, turnId: null, turnSequence: null, stepSequence: null });
     this.processing = false;
     hideAnimationOverlay();
     renderActionState();
@@ -207,7 +473,11 @@ class AnimationSequenceController {
     this.skipRequested = true;
     if (this.currentCancel) this.currentCancel();
     this.currentCancel = null;
-    this.queue.splice(0).forEach((item) => item.resolve());
+    this.queue.splice(0).forEach((item) => {
+      animationTasks.delete(item.token);
+      item.resolve();
+    });
+    animationTasks.clear();
     hideAnimationOverlay();
   }
 
@@ -238,16 +508,30 @@ const animationController = new AnimationSequenceController();
 window.getTourDebugState = () => ({
   actionInFlight,
   animationState: { ...animationState },
+  animationTasks: [...animationTasks.values()].map((task) => ({ ...task, task: undefined, resolve: undefined })),
   turnPresentationState: { ...turnPresentationState },
   animationController: {
     processing: animationController.processing,
     queueLength: animationController.queue.length,
+    queue: animationController.queue.map((item) => ({
+      token: item.token,
+      type: item.type,
+      actionId: item.actionId,
+      blocking: item.blocking,
+      status: item.status,
+      turnId: item.turnId,
+      turnSequence: item.turnSequence,
+      stepSequence: item.stepSequence,
+    })),
     hasCurrentCancel: Boolean(animationController.currentCancel),
   },
   pendingSnapshot,
   renderedStateVersion,
+  lastStateCurrentTurnPlayerId: lastState?.current_turn_player_id || null,
   lastPrivateTurnStep: lastPrivate?.turn_step || null,
-  rollDisabledReason: action("roll").allowed ? "" : action("roll").reason,
+  currentRollServerAllowed: currentRollServerAllowed(),
+  rollButtonDisabled: Boolean($("#rollDice")?.disabled),
+  rollDisabledReason: rollClientBlockReason(),
   eventRevealHidden: eventReveal?.hidden,
   queuedOccurrenceIds: [...queuedOccurrenceIds],
   displayingOccurrenceIds: [...displayingOccurrenceIds],
@@ -317,12 +601,41 @@ function action(name) {
   return lastPrivate?.allowed_actions?.[name] || { allowed: false, reason: "현재 사용할 수 없습니다." };
 }
 
+function snapshotStepSequence(snapshot) {
+  return snapshot?.private?.turn_step?.step_sequence ?? snapshot?.public?.turn_step?.step_sequence ?? -1;
+}
+
+function snapshotTurnSequence(snapshot) {
+  return snapshot?.public?.turn_sequence ?? -1;
+}
+
+function isStaleSnapshot(snapshot) {
+  if (!snapshot?.public) return false;
+  if (lastState && snapshot.public.game_instance_id !== lastState.game_instance_id) return false;
+  if (snapshot.state_version < renderedStateVersion) return true;
+  if (lastState && snapshotTurnSequence(snapshot) < lastState.turn_sequence) return true;
+  if (
+    lastState
+    && snapshotTurnSequence(snapshot) === lastState.turn_sequence
+    && snapshotStepSequence(snapshot) < (lastPrivate?.turn_step?.step_sequence ?? lastState.turn_step?.step_sequence ?? -1)
+  ) return true;
+  return false;
+}
+
 function configureActionButton(button, name) {
   const rule = action(name);
-  const presentationLocked = turnPresentationState.inputLocked;
-  button.disabled = actionInFlight || animationState.playing || presentationLocked || !rule.allowed;
-  const reason = presentationLocked ? turnPresentationState.lockReason : rule.reason;
-  button.title = rule.allowed && !presentationLocked ? "" : reason;
+  const requestLocked = hasBlockingRequestForCurrentTurn();
+  const presentationLocked = hasBlockingPresentationForCurrentTurn();
+  const animationLocked = hasBlockingAnimationForCurrentTurn();
+  const clientLocked = requestLocked || presentationLocked || animationLocked;
+  button.disabled = clientLocked || !rule.allowed;
+  const reason = name === "roll"
+    ? rollClientBlockReason()
+    : requestLocked ? "서버 응답을 기다리는 중입니다."
+      : presentationLocked ? turnPresentationState.lockReason
+        : animationLocked ? "현재 턴 결과를 표시하는 중입니다."
+          : rule.reason;
+  button.title = rule.allowed && !clientLocked ? "" : reason;
   button.dataset.disabledReason = reason || "";
   button.setAttribute("aria-describedby", "disabledActionHelp");
 }
@@ -451,14 +764,16 @@ async function playMovementAnimation(result) {
   arrival?.classList.remove("arrival-highlight");
 }
 
-async function playDiceSequence(result) {
+async function playDiceSequence(result, options = {}) {
+  const identity = options.identity || identityFromRoll(result);
+  const blocking = options.blocking ?? true;
   try {
     const actor = lastState?.players?.find((player) => player.id === result.player_id);
     if (actor?.is_bot && !lastState?.config?.fast_simulation) {
-      await runPresentationScene(presentationPhases.ACTION_REQUEST, result.action_id, 400, `${actor.nickname}의 턴을 준비하는 중입니다.`);
+      await runPresentationScene(presentationPhases.ACTION_REQUEST, result.action_id, 400, `${actor.nickname}의 턴을 준비하는 중입니다.`, null, { identity, blocking });
     }
-    await runPresentationScene(presentationPhases.DICE_REVEAL, result.action_id, 1200, "주사위 결과를 표시하는 중입니다.", () => playDiceAnimation(result));
-    await runPresentationScene(presentationPhases.PIECE_MOVEMENT, result.action_id, 0, "말이 이동 중입니다.", () => playMovementAnimation(result));
+    await runPresentationScene(presentationPhases.DICE_REVEAL, result.action_id, 1200, "주사위 결과를 표시하는 중입니다.", () => playDiceAnimation(result), { identity, blocking });
+    await runPresentationScene(presentationPhases.PIECE_MOVEMENT, result.action_id, 0, "말이 이동 중입니다.", () => playMovementAnimation(result), { identity, blocking });
     await syncPresentationSnapshot(result.action_id);
     const cell = lastState?.board?.[result.to_position];
     const hasDecision = Boolean(lastPrivate?.pending_action);
@@ -466,7 +781,7 @@ async function playDiceSequence(result) {
     await runPresentationScene(presentationPhases.ARRIVAL_REVEAL, result.action_id, arrivalHold, "도착 칸 결과를 확인하는 중입니다.", () => {
       focusArrivalInformation(result.to_position, false);
       presentationMetric(result.action_id).arrival_revealed_at_ms = Math.round(performance.now() - presentationMetric(result.action_id).clicked_at);
-    });
+    }, { identity, blocking });
   } finally {
     setDiceFace(result.dice, `주사위 결과 ${result.dice}`);
     moveChipTo(result.player_id, result.to_position);
@@ -476,9 +791,11 @@ async function playDiceSequence(result) {
 async function syncPresentationSnapshot(actionId) {
   setPresentationPhase(presentationPhases.ARRIVAL_REVEAL, { actionId, locked: true, reason: "최신 게임 상태를 동기화하는 중입니다." });
   const snapshot = await getPlayerSnapshot();
-  if (!snapshot || snapshot.state_version < (lastPrivate?.state_version ?? -1)) return;
+  if (!snapshot || isStaleSnapshot(snapshot)) return;
+  clearStaleLocksForRollSnapshot(snapshot);
   lastState = snapshot.public;
   lastPrivate = snapshot.private;
+  convergeCurrentRollDecision();
   const me = lastState.players.find((player) => player.id === playerId);
   renderBoard(lastState, me);
   renderMeters(lastState, me, lastPrivate);
@@ -580,7 +897,7 @@ function closeEventRevealImmediately(occurrenceId = null) {
     animationOverlay.hidden = true;
   }
   animationController.currentCancel = null;
-  finishPresentation(turnPresentationState.actionId || `event-${occurrenceId || "unknown"}`);
+  finishPresentation({ ...currentTurnIdentity(), actionId: turnPresentationState.actionId || `event-${occurrenceId || "unknown"}` });
 }
 
 async function finishEventPresentationSafely(occurrence, exclusionToken, reason) {
@@ -681,7 +998,7 @@ function enqueuePendingEvents(privateData) {
         queuedOccurrenceIds.delete(occurrence.occurrence_id);
         displayingOccurrenceIds.delete(occurrence.occurrence_id);
       }
-    });
+    }, { identity: currentTurnIdentity(), blocking: true, timeoutMs: 15000 });
   });
 }
 
@@ -820,12 +1137,13 @@ function enqueueEconomicAction(action) {
   if (!action?.action_id || queuedEconomicActionIds.has(action.action_id) || economicSeenStore().values.has(action.action_id)) return Promise.resolve();
   if (action.game_instance_id !== storedGameInstanceId) return Promise.resolve();
   queuedEconomicActionIds.add(action.action_id);
+  const identity = identityFromEconomicAction(action);
   return animationController.enqueue("economic", action.action_id, async () => {
     try {
       const changes = action.cash_changes || [];
       const transfer = changes.some((change) => change.counterparty_player_id) || changes.filter((change) => change.amount_won < 0).length && changes.filter((change) => change.amount_won > 0).length;
       const minimum = action.action_type === "start_settlement" ? 4000 : changes.length >= 5 ? 1500 : changes.length > 1 ? 350 * changes.length : transfer ? 1000 : 750;
-      await runPresentationScene(presentationPhases.ECONOMIC_RESULT, action.action_id, minimum, "경제 결과를 표시하는 중입니다.", () => playEconomicAction(action));
+      await runPresentationScene(presentationPhases.ECONOMIC_RESULT, action.action_id, minimum, "경제 결과를 표시하는 중입니다.", () => playEconomicAction(action), { identity, blocking: false });
     }
     finally {
       rememberEconomicAction(action.action_id);
@@ -835,7 +1153,7 @@ function enqueueEconomicAction(action) {
           .catch((error) => console.warn("Economic animation cursor was not acknowledged", error));
       }
     }
-  });
+  }, { identity, blocking: false, timeoutMs: 8000 });
 }
 
 function enqueuePendingEconomicActions(privateData, publicActions = []) {
@@ -1039,7 +1357,6 @@ function renderTurnStepIndicator(state) {
   const actual = [...completed, current.step_id]
     .map(groupTurnStep)
     .filter((stepId, index, list) => stepId && list.indexOf(stepId) === index);
-  if (!["TURN_END_DECISION", "TURN_COMPLETE"].includes(groupTurnStep(current.step_id))) actual.push("TURN_END_DECISION");
   const labels = {
     ROLL_DECISION: "주사위", ROLL_RESOLUTION: "이동", ARRIVAL_PRESENTATION: "도착",
     SETTLEMENT_PRESENTATION: "정산", LAND_PURCHASE_DECISION: "구매 선택",
@@ -1424,7 +1741,7 @@ function renderActionState() {
   configureActionButton(reviveAction, "revive");
   const buildAllowed = action("build").allowed;
   $("#buildingTypeField").hidden = !buildAllowed;
-  buildingType.disabled = actionInFlight || animationState.playing || !buildAllowed;
+  buildingType.disabled = hasBlockingRequestForCurrentTurn() || hasBlockingAnimationForCurrentTurn() || !buildAllowed;
   const available = action("build").building_types || [];
   const options = action("build").building_options || {};
   Array.from(buildingType.options).forEach((option) => {
@@ -1487,10 +1804,11 @@ async function refreshPlayer() {
         state = snapshot.public;
         privateData = snapshot.private;
         if (state.state_version !== privateData.state_version || state.state_version !== snapshot.state_version) return;
+        if (isStaleSnapshot(snapshot)) return;
       }
     }
     if (!state) state = await getState();
-    if (sequence !== refreshSequence || state.state_version < renderedStateVersion) return;
+    if (sequence !== refreshSequence || isStaleSnapshot({ public: state, private: privateData, state_version: state.state_version })) return;
     const criticalChange = lastState && (
       state.game_instance_id !== lastState.game_instance_id
       || state.ended
@@ -1516,7 +1834,10 @@ async function refreshPlayer() {
       rankingModal.hidden = true;
       financeModal.hidden = true;
       closeEventRevealImmediately();
-    } else if (animationState.playing || turnPresentationState.inputLocked) {
+    }
+    const snapshot = { public: state, private: privateData, state_version: state.state_version };
+    clearStaleLocksForRollSnapshot(snapshot);
+    if (hasBlockingAnimationForCurrentTurn() || hasBlockingPresentationForCurrentTurn()) {
       pendingSnapshot = { public: state, private: privateData, state_version: state.state_version };
       return;
     }
@@ -1526,13 +1847,14 @@ async function refreshPlayer() {
     } else if (incomingRoll?.action_id && incomingRoll.action_id !== observedRollActionId && lastState) {
       observedRollActionId = incomingRoll.action_id;
       pendingSnapshot = { public: state, private: privateData, state_version: state.state_version };
+      const rollIdentity = identityFromRoll(incomingRoll);
       animationController.enqueue("dice", incomingRoll.action_id, async () => {
         try {
-          await playDiceSequence(incomingRoll);
+          await playDiceSequence(incomingRoll, { identity: rollIdentity, blocking: identityMatchesCurrentTurn(rollIdentity) });
         } finally {
-          finishPresentation(incomingRoll.action_id);
+          finishPresentation(rollIdentity);
         }
-      });
+      }, { identity: rollIdentity, blocking: identityMatchesCurrentTurn(rollIdentity), timeoutMs: 5000 });
       return;
     }
     const me = state.players.find((player) => player.id === playerId);
@@ -1540,6 +1862,7 @@ async function refreshPlayer() {
     if (state.state_version === renderedStateVersion) return;
     lastState = state;
     lastPrivate = privateData;
+    convergeCurrentRollDecision();
     joinForm.hidden = Boolean(authenticatedMe);
     playerBadge.innerHTML = authenticatedMe
       ? `<strong>${escapeHtml(authenticatedMe.nickname)}</strong><span>${escapeHtml(statusName(authenticatedMe.status))}</span>`
@@ -1581,7 +1904,7 @@ async function refreshPlayer() {
   } catch (error) {
     if (error.name !== "AbortError") {
       connectionHadError = true;
-      if (animationState.playing) animationController.cancel();
+      if (hasBlockingAnimationForCurrentTurn()) animationController.cancel();
       actionInFlight = false;
       hideAnimationOverlay();
       renderActionState();
@@ -1668,7 +1991,7 @@ function closeActionConfirmation() {
 }
 
 function confirmBeforeAction(origin, config, callback) {
-  if (actionInFlight || animationState.playing) return;
+  if (hasBlockingRequestForCurrentTurn() || hasBlockingAnimationForCurrentTurn()) return;
   confirmationOrigin = origin || document.activeElement;
   pendingConfirmedAction = callback;
   const modal = $("#actionConfirmModal");
@@ -1712,11 +2035,12 @@ function confirmedRequest(button, url, body, config) {
 }
 
 async function performAction(button, url, body) {
-  if (actionInFlight || animationState.playing) return;
+  if (hasBlockingRequestForCurrentTurn() || hasBlockingAnimationForCurrentTurn()) return;
   actionInFlight = true;
   const temporaryActionId = `request-${Date.now()}`;
+  requestLockIdentity = normalizeIdentity({ ...currentTurnIdentity(), actionId: temporaryActionId });
   presentationMetric(temporaryActionId);
-  setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: temporaryActionId, locked: true, reason: "서버 응답을 기다리는 중입니다." });
+  setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: temporaryActionId, locked: true, reason: "서버 응답을 기다리는 중입니다.", identity: requestLockIdentity, blocking: true });
   renderActionState();
   showMessage("처리 중…");
   try {
@@ -1739,8 +2063,9 @@ async function performAction(button, url, body) {
     showMessage(error.message || "요청을 처리하지 못했습니다.", true);
   } finally {
     actionInFlight = false;
+    requestLockIdentity = null;
     await syncPresentationSnapshot(turnPresentationState.actionId || temporaryActionId);
-    finishPresentation(turnPresentationState.actionId || temporaryActionId);
+    finishPresentation({ ...currentTurnIdentity(), actionId: turnPresentationState.actionId || temporaryActionId });
     renderActionState();
   }
 }
@@ -1780,7 +2105,7 @@ function renderBuildConfirmation(preview) {
 }
 
 async function openBuildConfirmation() {
-  if (actionInFlight || animationState.playing || !action("build").allowed) return;
+  if (hasBlockingRequestForCurrentTurn() || hasBlockingAnimationForCurrentTurn() || !action("build").allowed) return;
   const selectedType = buildingType.value;
   if (!selectedType) {
     $("#disabledActionHelp").textContent = "먼저 건물 유형을 선택하세요.";
@@ -1823,8 +2148,9 @@ async function confirmBuildAction() {
   if (!preview || actionInFlight) return;
   actionInFlight = true;
   const presentationId = `build-${Date.now()}`;
+  requestLockIdentity = normalizeIdentity({ ...currentTurnIdentity(), actionId: presentationId });
   let completedActionId = presentationId;
-  setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: presentationId, locked: true, reason: "건설 결과를 확인하는 중입니다." });
+  setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: presentationId, locked: true, reason: "건설 결과를 확인하는 중입니다.", identity: requestLockIdentity, blocking: true });
   $("#confirmBuild").disabled = true;
   $("#cancelBuildConfirm").disabled = true;
   $("#confirmBuild").textContent = "건설 처리 중…";
@@ -1857,6 +2183,7 @@ async function confirmBuildAction() {
     catch (refreshError) { $("#buildConfirmError").textContent = `${error.message} ${refreshError.message}`; }
   } finally {
     actionInFlight = false;
+    requestLockIdentity = null;
     $("#cancelBuildConfirm").disabled = false;
     renderActionState();
     await syncPresentationSnapshot(completedActionId);
@@ -1864,16 +2191,17 @@ async function confirmBuildAction() {
       buildConfirmationOrigin?.focus();
       buildConfirmationOrigin = null;
     }
-    finishPresentation(completedActionId);
+    finishPresentation({ ...currentTurnIdentity(), actionId: completedActionId });
     renderActionState();
   }
 }
 
 async function performRoll(button) {
-  if (actionInFlight || animationState.playing) return;
+  if (hasBlockingRequestForCurrentTurn() || hasBlockingAnimationForCurrentTurn()) return;
   const clickedAt = performance.now();
   actionInFlight = true;
-  setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: null, locked: true, reason: "서버에서 주사위 결과를 확인하는 중입니다." });
+  requestLockIdentity = normalizeIdentity({ ...currentTurnIdentity(), actionId: `roll-request-${Date.now()}` });
+  setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: null, locked: true, reason: "서버에서 주사위 결과를 확인하는 중입니다.", identity: requestLockIdentity, blocking: true });
   renderActionState();
   showAnimationStage(diceStage);
   diceFace.classList.add("is-rolling");
@@ -1888,7 +2216,8 @@ async function performRoll(button) {
     metric.server_response_ms = Math.round(performance.now() - requestStarted);
     turnPresentationState.actionId = result.action_id;
     observedRollActionId = result.action_id;
-    await animationController.enqueue("dice", result.action_id, () => playDiceSequence(result));
+    const rollIdentity = identityFromRoll(result);
+    await animationController.enqueue("dice", result.action_id, () => playDiceSequence(result, { identity: rollIdentity, blocking: true }), { identity: rollIdentity, blocking: true, timeoutMs: 5000 });
     const pendingEvent = (lastPrivate?.pending_event_occurrences || [])[0];
     if (pendingEvent) {
       queuedOccurrenceIds.add(pendingEvent.occurrence_id);
@@ -1909,8 +2238,9 @@ async function performRoll(button) {
     showMessage(error.message || "주사위를 굴리지 못했습니다.", true);
   } finally {
     actionInFlight = false;
+    requestLockIdentity = null;
     await syncPresentationSnapshot(turnPresentationState.actionId);
-    if (turnPresentationState.actionId) finishPresentation(turnPresentationState.actionId);
+    if (turnPresentationState.actionId) finishPresentation({ ...currentTurnIdentity(), actionId: turnPresentationState.actionId });
     renderActionState();
   }
 }
@@ -1980,7 +2310,7 @@ joinForm.addEventListener("submit", async (event) => {
     window.localStorage.setItem("tour_reconnect_token", reconnectToken);
     window.localStorage.setItem("tour_game_instance_id", storedGameInstanceId);
     window.currentGameInstanceId = storedGameInstanceId;
-    await syncPresentationSnapshot(completedActionId);
+    await syncPresentationSnapshot("join");
   } catch (error) {
     showMessage(error.message, true);
   }

@@ -95,6 +95,18 @@ class TurnFlowService:
             }.get(pending.get("type"), "MANAGEMENT_DECISION")
         return "TURN_END_DECISION"
 
+    def turn_completion_policy(self, player_id):
+        step = self.engine.state.turn_step or {}
+        if not player_id or step.get("player_id") != player_id:
+            return "manual_end"
+        if step.get("step_id") == "MANAGEMENT_DECISION":
+            return "manual_end"
+        if not step.get("user_input_required") and (step.get("next_step") or self.decision_step_after_presentation(player_id)) == "TURN_END_DECISION":
+            return "auto_end"
+        if step.get("step_id") == "TURN_END_DECISION":
+            return "auto_end"
+        return "continue_to_decision"
+
     def can_roll(self, player_id):
         engine = self.engine
         player = engine._find_player(player_id)
@@ -105,30 +117,30 @@ class TurnFlowService:
             "event_occurrence_id": None,
         }
         if engine.state.phase != "active" or engine.state.ended:
-            return engine._action(False, "게임이 진행 중이 아닙니다.", reason_code="GAME_NOT_ACTIVE", blocking_state=blocking)
+            return engine._action(False, "게임이 진행 중이 아닙니다.", reason_code="GAME_NOT_ACTIVE", blocking_state=blocking, turn_id=step.get("turn_id"), turn_sequence=engine.state.turn_sequence, step_id=step.get("step_id"), step_sequence=step.get("step_sequence"), recoverable=False)
         if engine.state.paused:
-            return engine._action(False, "호스트가 게임을 일시중지했습니다.", reason_code="GAME_PAUSED", blocking_state=blocking)
+            return engine._action(False, "호스트가 게임을 일시중지했습니다.", reason_code="GAME_PAUSED", blocking_state=blocking, turn_id=step.get("turn_id"), turn_sequence=engine.state.turn_sequence, step_id=step.get("step_id"), step_sequence=step.get("step_sequence"), recoverable=True)
         if not player or player.status != "active":
-            return engine._action(False, "활성 플레이어만 주사위를 굴릴 수 있습니다.", reason_code="PLAYER_NOT_ACTIVE", blocking_state=blocking)
+            return engine._action(False, "활성 플레이어만 주사위를 굴릴 수 있습니다.", reason_code="PLAYER_NOT_ACTIVE", blocking_state=blocking, turn_id=step.get("turn_id"), turn_sequence=engine.state.turn_sequence, step_id=step.get("step_id"), step_sequence=step.get("step_sequence"), recoverable=False)
         current = engine.current_player()
         if not current or current.id != player.id:
-            return engine._action(False, "현재 차례가 아닙니다.", reason_code="NOT_CURRENT_PLAYER", blocking_state=blocking)
+            return engine._action(False, "현재 차례가 아닙니다.", reason_code="NOT_CURRENT_PLAYER", blocking_state=blocking, turn_id=step.get("turn_id"), turn_sequence=engine.state.turn_sequence, step_id=step.get("step_id"), step_sequence=step.get("step_sequence"), recoverable=False)
         if engine.state.turn_has_rolled:
-            return engine._action(False, "이번 턴에는 이미 주사위를 굴렸습니다.", reason_code="ALREADY_ROLLED", blocking_state=blocking)
+            return engine._action(False, "이번 턴에는 이미 주사위를 굴렸습니다.", reason_code="ALREADY_ROLLED", blocking_state=blocking, turn_id=step.get("turn_id"), turn_sequence=engine.state.turn_sequence, step_id=step.get("step_id"), step_sequence=step.get("step_sequence"), recoverable=False)
         if engine.state.pending_action:
-            return engine._action(False, "도착 칸의 선택을 먼저 완료하세요.", reason_code="PENDING_ACTION", blocking_state=blocking)
+            return engine._action(False, "도착 칸의 선택을 먼저 완료하세요.", reason_code="PENDING_ACTION", blocking_state=blocking, turn_id=step.get("turn_id"), turn_sequence=engine.state.turn_sequence, step_id=step.get("step_id"), step_sequence=step.get("step_sequence"), recoverable=False)
         if step.get("step_id") == "EVENT_CONFIRMATION":
             unacknowledged = [
                 item for item in engine._visible_event_occurrences(player)
                 if item["occurrence_id"] not in engine.state.event_acknowledged_occurrences.get(player.id, set())
             ]
             blocking["event_occurrence_id"] = unacknowledged[-1]["occurrence_id"] if unacknowledged else None
-            return engine._action(False, "이벤트 확인을 먼저 완료하세요.", reason_code="EVENT_CONFIRMATION_PENDING", blocking_state=blocking)
+            return engine._action(False, "이벤트 확인을 먼저 완료하세요.", reason_code="EVENT_CONFIRMATION_PENDING", blocking_state=blocking, turn_id=step.get("turn_id"), turn_sequence=engine.state.turn_sequence, step_id=step.get("step_id"), step_sequence=step.get("step_sequence"), recoverable=False)
         if engine.state.land_trade_offer or engine.state.operating_right_offer or engine.state.usage_change_request or engine.state.pending_land_takeover:
-            return engine._action(False, "대기 중인 요청을 먼저 처리하세요.", reason_code="REQUEST_PENDING", blocking_state=blocking)
+            return engine._action(False, "대기 중인 요청을 먼저 처리하세요.", reason_code="REQUEST_PENDING", blocking_state=blocking, turn_id=step.get("turn_id"), turn_sequence=engine.state.turn_sequence, step_id=step.get("step_id"), step_sequence=step.get("step_sequence"), recoverable=False)
         if step.get("step_id") != "ROLL_DECISION" or step.get("player_id") != player.id:
-            return engine._action(False, "이전 단계 처리가 완료되지 않았습니다.", reason_code="WRONG_TURN_STEP", blocking_state=blocking)
-        return engine._action(True, "", reason_code="", blocking_state=blocking)
+            return engine._action(False, "이전 단계 처리가 완료되지 않았습니다.", reason_code="STALE_TURN_STEP", blocking_state=blocking, turn_id=step.get("turn_id"), turn_sequence=engine.state.turn_sequence, step_id=step.get("step_id"), step_sequence=step.get("step_sequence"), recoverable=True)
+        return engine._action(True, "", reason_code=None, blocking_state=blocking, turn_id=step.get("turn_id"), turn_sequence=engine.state.turn_sequence, step_id=step.get("step_id"), step_sequence=step.get("step_sequence"), recoverable=False)
 
 
 class EventPresentationService:
@@ -461,6 +473,7 @@ class GameEngine:
             related_players.update(change.get("ownership_chain_before", []))
             related_players.update(change.get("ownership_chain", []))
         self.state.economic_sequence += 1
+        step = self.state.turn_step or {}
         action = {
             "action_id": f"econ_{self.state.game_instance_id}_{self.state.economic_sequence}",
             "sequence": self.state.economic_sequence,
@@ -470,6 +483,9 @@ class GameEngine:
             "cash_changes": cash_changes,
             "asset_changes": asset_changes,
             "game_instance_id": self.state.game_instance_id,
+            "turn_id": step.get("turn_id"),
+            "turn_sequence": self.state.turn_sequence,
+            "step_sequence": step.get("step_sequence"),
             "state_version": self.state.state_version + 1,
             **deepcopy(context or {}),
         }
@@ -701,6 +717,7 @@ class GameEngine:
         roll_result = {
             "action": "dice_roll",
             "action_id": new_id("roll"),
+            "game_instance_id": self.state.game_instance_id,
             "dice": dice,
             "player_id": player.id,
             "from_position": start_position,
@@ -1836,6 +1853,7 @@ class GameEngine:
             "last_activity_player_id": self.state.last_activity_player_id,
             "elapsed_turn_seconds": round(self.elapsed_turn_seconds(), 3),
             "turn_step": self._public_turn_step(),
+            "turn_completion_policy": self.turn_flow_service.turn_completion_policy(self.current_player().id if self.current_player() else None),
             "turn_total_remaining_seconds": self.turn_total_remaining_seconds(),
             "turn_step_history": [deepcopy(item) for item in self.state.turn_step_history if item.get("turn_id") == (self.state.turn_step or {}).get("turn_id")],
             "pending_action": self.state.pending_action,
@@ -1997,6 +2015,9 @@ class GameEngine:
                 ],
                 "cash_changes": [],
                 "game_instance_id": action["game_instance_id"],
+                "turn_id": action.get("turn_id"),
+                "turn_sequence": action.get("turn_sequence"),
+                "step_sequence": action.get("step_sequence"),
                 "state_version": action["state_version"],
                 "region_id": action.get("region_id"),
                 "special_region_id": action.get("special_region_id"),
@@ -2383,8 +2404,10 @@ class GameEngine:
         actions = {
             "roll": roll_action,
             "end_turn": self._action(
-                is_turn and not pending and step_id in {"MANAGEMENT_DECISION", "TURN_END_DECISION"},
+                is_turn and not pending and step_id == "MANAGEMENT_DECISION",
                 "먼저 도착 칸의 선택과 결과 확인을 완료하세요." if is_turn else turn_reason,
+                required=False,
+                automatic=False,
             ),
             "purchase_land": self._action(
                 purchase_pending,
@@ -2936,6 +2959,9 @@ class GameEngine:
         if step.get("step_id") == "USAGE_CHANGE_RESPONSE" and self.state.usage_change_request:
             return self.public_state()
         next_step = step.get("next_step") or self.turn_flow_service.decision_step_after_presentation(player_id)
+        if next_step == "TURN_END_DECISION":
+            self._finish_turn(player_id)
+            return self.public_state()
         self._set_turn_step(next_step, "presentation_completed", player_id=player_id)
         return self.public_state()
 
@@ -3176,13 +3202,15 @@ class GameEngine:
             self.decline_pending_action(player.id)
             self.complete_turn_presentation(player.id)
         elif step_id in {"MANAGEMENT_DECISION", "TRADE_CONFIGURATION"}:
-            self._set_turn_step("TURN_END_DECISION", "management_timeout", player_id=player.id)
+            self._finish_turn(player.id)
         elif step_id == "EVENT_CONFIRMATION":
             visible = [item for item in self._visible_event_occurrences(player) if item["occurrence_id"] not in self.state.event_acknowledged_occurrences.get(player.id, set())]
             if visible:
                 self.acknowledge_events(player.id, len(self.state.event_history), visible[0]["occurrence_id"])
             activity["suppress_next_activity"] = False
-            self._set_turn_step("TURN_END_DECISION", "event_timeout_acknowledged", player_id=player.id)
+            if activity.get("player_id") == player.id:
+                activity["had_valid_user_input"] = True
+            self._finish_turn(player.id)
         elif step_id == "BANKRUPTCY_TAKEOVER" and self.state.pending_land_takeover:
             self.respond_land_takeover(player.id, False)
         elif step_id in {"TURN_END_DECISION", "REVIVAL_DECISION"}:

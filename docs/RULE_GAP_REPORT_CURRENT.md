@@ -1,9 +1,9 @@
 # RULE_GAP_REPORT_CURRENT
 
-- 작업 전 커밋: `d0fa8bf2f4bfa7a5d99eeb35dbdda62c92123dd3`
+- 작업 전 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647`
 - 작업 후 커밋: `UNCOMMITTED_WORKTREE`
-- 테스트를 실제 실행한 커밋: `d0fa8bf2f4bfa7a5d99eeb35dbdda62c92123dd3` + working tree changes
-- 브라우저 테스트를 실행한 커밋: `NOT_RUN_NODE_NOT_INSTALLED`
+- 테스트를 실제 실행한 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647` + working tree changes
+- 브라우저 테스트를 실행한 커밋: `ATTEMPTED_SKIPPED_LIBNSPR4_MISSING`
 
 ## 해결됨
 
@@ -14,13 +14,14 @@
 | 단계 재접속 유예 반복 | RESOLVED | 유예 키에 `game_instance_id + turn_id + player_id + step_sequence` 사용 |
 | 옛 숨은 타이머 제출 | RESOLVED | 호스트 UI에서 hidden `turnLimit` 제거, `legacy_turn_limit_seconds`로 호환 |
 | timeout 메시지 모호함 | RESOLVED | 단계별 한국어 자동 처리 메시지 |
+| 결과 확인/턴 종료 중복 | RESOLVED | 추가 행동이 없으면 `complete_turn_presentation`과 timeout 처리가 `_finish_turn`으로 바로 다음 플레이어의 `ROLL_DECISION`을 연다 |
+| 오래된 snapshot이 최신 턴 UI 덮어씀 | RESOLVED | player client가 `game_instance_id`, `state_version`, `turn_sequence`, `step_sequence`로 stale snapshot 렌더링을 차단 |
 
 ## 부분 해결
 
 | 항목 | 상태 | 남은 일 |
 | --- | --- | --- |
 | 서버 단계와 클라이언트 장면 분리 | PARTIAL | 화면 표시 묶음은 분리했지만 독립 `ClientPresentationScene` 데이터 모델은 없음 |
-| 결과 확인/턴 종료 중복 | PARTIAL | 단순 결과는 비입력 표현 단계지만 중요 결과의 `next_step_behavior` 명시 필드는 없음 |
 | 전체 wall-clock 안전 상한 | PARTIAL | 공개 필드는 추가했으나 강제 로직은 없음 |
 | 봇 presentation backlog | PARTIAL | 정책은 문서화했지만 `presentation_backlog` API 필드는 없음 |
 
