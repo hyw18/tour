@@ -36,6 +36,7 @@ const animationState = {
   stepSequence: null
 };
 const animationTasks = new Map();
+const ECONOMIC_PRESENTATION_TIME_SCALE = 3;
 const presentationPhases = Object.freeze({
   ACTION_REQUEST: "ACTION_REQUEST", DICE_REVEAL: "DICE_REVEAL",
   PIECE_MOVEMENT: "PIECE_MOVEMENT", ARRIVAL_REVEAL: "ARRIVAL_REVEAL",
@@ -105,7 +106,9 @@ function normalizeIdentity(identity = {}) {
 function identityFromRoll(result = {}) {
   return normalizeIdentity({
     gameInstanceId: result.game_instance_id || lastState?.game_instance_id,
+    turnId: result.turn_id,
     turnSequence: result.turn_sequence,
+    stepSequence: result.step_sequence,
     actionId: result.action_id,
   });
 }
@@ -299,6 +302,15 @@ function convergeCurrentRollDecision() {
     recovered = true;
   }
   requestLockIdentity = null;
+  animationController.queue = animationController.queue.filter((item) => {
+    const keep = item.blocking && identityMatchesCurrentTurn(item);
+    if (!keep) {
+      animationTasks.delete(item.token);
+      item.resolve?.();
+      recovered = true;
+    }
+    return keep;
+  });
   if (turnPresentationState.inputLocked && !identityMatchesCurrentTurn(turnPresentationState)) {
     setPresentationPhase(presentationPhases.PLAYER_DECISION, { actionId: turnPresentationState.actionId, locked: false, reason: "", canSkip: false });
     recovered = true;
@@ -322,6 +334,7 @@ function convergeCurrentRollDecision() {
       reason: "stale_lock_on_roll_decision",
     });
   }
+  renderActionState();
   return recovered;
 }
 
@@ -691,6 +704,10 @@ function animationDuration(full, fast) {
   return mode === "fast" ? fast : full;
 }
 
+function economicAnimationDuration(full, fast) {
+  return Math.round(animationDuration(full, fast) * ECONOMIC_PRESENTATION_TIME_SCALE);
+}
+
 function showAnimationStage(stage) {
   animationOverlay.hidden = false;
   diceStage.hidden = stage !== diceStage;
@@ -774,7 +791,7 @@ async function playDiceSequence(result, options = {}) {
     }
     await runPresentationScene(presentationPhases.DICE_REVEAL, result.action_id, 1200, "주사위 결과를 표시하는 중입니다.", () => playDiceAnimation(result), { identity, blocking });
     await runPresentationScene(presentationPhases.PIECE_MOVEMENT, result.action_id, 0, "말이 이동 중입니다.", () => playMovementAnimation(result), { identity, blocking });
-    await syncPresentationSnapshot(result.action_id);
+    await syncPresentationSnapshot(result.action_id, { identity, blocking });
     const cell = lastState?.board?.[result.to_position];
     const hasDecision = Boolean(lastPrivate?.pending_action);
     const arrivalHold = cell?.type === "start" ? 1200 : cell?.type === "event" ? 500 : hasDecision ? 900 : 700;
@@ -788,8 +805,14 @@ async function playDiceSequence(result, options = {}) {
   }
 }
 
-async function syncPresentationSnapshot(actionId) {
-  setPresentationPhase(presentationPhases.ARRIVAL_REVEAL, { actionId, locked: true, reason: "최신 게임 상태를 동기화하는 중입니다." });
+async function syncPresentationSnapshot(actionId, options = {}) {
+  setPresentationPhase(presentationPhases.ARRIVAL_REVEAL, {
+    actionId,
+    locked: true,
+    reason: "최신 게임 상태를 동기화하는 중입니다.",
+    identity: options.identity,
+    blocking: options.blocking ?? true
+  });
   const snapshot = await getPlayerSnapshot();
   if (!snapshot || isStaleSnapshot(snapshot)) return;
   clearStaleLocksForRollSnapshot(snapshot);
@@ -808,24 +831,24 @@ async function syncPresentationSnapshot(actionId) {
   presentationMetric(actionId).allowed_actions_updated_at_ms = Math.round(performance.now() - presentationMetric(actionId).clicked_at);
 }
 
-async function completeServerPresentation(actionId) {
+async function completeServerPresentation(actionId, options = {}) {
   const step = lastPrivate?.turn_step;
   if (!step || step.user_input_required || step.player_id !== playerId) return;
   await postJson("/api/turn-step/presentation-complete", {
     player_id: playerId,
     step_sequence: step.step_sequence
   });
-  await syncPresentationSnapshot(actionId);
+  await syncPresentationSnapshot(actionId, options);
 }
 
-async function showResultSummary(actionId, { title, detail = "", next = "", holdMs = 600, required = false } = {}) {
+async function showResultSummary(actionId, { title, detail = "", next = "", holdMs = 600, required = false, identity = null, blocking = true } = {}) {
   const summary = $("#resultSummary");
   $("#resultSummaryTitle").textContent = title || "결과를 확인하세요.";
   $("#resultSummaryDetail").textContent = detail;
   $("#resultSummaryNext").textContent = next ? `다음 행동: ${next}` : "";
   $("#continuePresentation").textContent = required ? "확인하고 계속" : "계속";
   summary.hidden = false;
-  await runPresentationScene(presentationPhases.RESULT_SUMMARY, actionId, holdMs, "결과 요약을 확인하는 중입니다.");
+  await runPresentationScene(presentationPhases.RESULT_SUMMARY, actionId, holdMs, "결과 요약을 확인하는 중입니다.", null, { identity, blocking });
   if (required && selectedAnimationMode() !== "minimal" && !animationController.skipRequested) {
     await new Promise((resolve) => {
       const button = $("#continuePresentation");
@@ -1034,7 +1057,7 @@ async function animateCashCounter(element, fromValue, toValue) {
     if (element) element.textContent = `${money(toValue)}원`;
     return;
   }
-  const duration = animationDuration(480, 220);
+  const duration = economicAnimationDuration(480, 220);
   const started = performance.now();
   while (!animationController.skipRequested) {
     const progress = Math.min(1, (performance.now() - started) / duration);
@@ -1048,9 +1071,10 @@ async function animateCashCounter(element, fromValue, toValue) {
 
 function economicIconFor(action) {
   const building = action.building_type || action.asset_changes?.find((item) => item.building_type)?.building_type;
+  const actionType = action.action_type || "";
   if (building) return ({ residential: "⌂", commercial: "▥", industrial: "⚙", mixed_use: "⌂▥" })[building] || "◆";
-  if (action.action_type.includes("sale")) return "⇄";
-  if (action.action_type.includes("purchase")) return "✓";
+  if (actionType.includes("sale")) return "⇄";
+  if (actionType.includes("purchase")) return "✓";
   return "₩";
 }
 
@@ -1075,19 +1099,20 @@ async function playEconomicAction(action) {
     $("#economicReason").textContent = `${playerName(lastState, change.player_id)} · ${economicReasonNames[change.reason] || change.reason}`;
     $("#economicAmount").textContent = "금액을 확인하는 중…";
     $("#economicAmount").className = "";
-    await animationController.wait(animationDuration(180, 100));
+    await animationController.wait(economicAnimationDuration(180, 100));
     $("#economicAmount").textContent = `${change.amount_won > 0 ? "+" : ""}${money(change.amount_won)}원 ${change.amount_won >= 0 ? "수익" : "지급"}`;
     $("#economicAmount").className = change.amount_won >= 0 ? "income" : "expense";
     if (change.player_id === playerId) {
       await animateCashCounter($("[data-current-cash]"), change.cash_before_won, change.cash_after_won);
     } else {
-      await animationController.wait(animationDuration(520, 230));
+      await animationController.wait(economicAnimationDuration(520, 230));
     }
   }
   if (!changes.length) {
-    $("#economicAmount").textContent = action.action_type.includes("sale") ? "매각 완료" : "변경 완료";
-    $("#economicReason").textContent = economicReasonNames[action.action_type] || action.action_type;
-    await animationController.wait(animationDuration(600, 250));
+    const actionType = action.action_type || "";
+    $("#economicAmount").textContent = actionType.includes("sale") ? "매각 완료" : "변경 완료";
+    $("#economicReason").textContent = economicReasonNames[actionType] || actionType || "경제 변동";
+    await animationController.wait(economicAnimationDuration(600, 250));
   }
   const affectedRows = new Set();
   (action.asset_changes || []).forEach((change) => {
@@ -1108,7 +1133,7 @@ async function playEconomicAction(action) {
       row.classList.add("asset-removing");
     }
   });
-  await animationController.wait(animationDuration(240, 80));
+  await animationController.wait(economicAnimationDuration(240, 80));
   highlighted?.classList.remove("economic-highlight");
   affectedRows.forEach((row) => row.classList.remove("asset-change-highlight", "asset-removing"));
 }
@@ -1122,10 +1147,10 @@ async function playSettlementSequence(settlement) {
     $("#economicReason").textContent = step.label;
     $("#economicAmount").textContent = "계산 결과를 확인하는 중…";
     $("#economicAmount").className = "";
-    await animationController.wait(animationDuration(160, 95));
+    await animationController.wait(economicAnimationDuration(160, 95));
     $("#economicAmount").textContent = `${step.amount_won > 0 ? "+" : ""}${money(step.amount_won)}원`;
     $("#economicAmount").className = step.amount_won >= 0 ? "income" : "expense";
-    await animationController.wait(animationDuration(260, 155));
+    await animationController.wait(economicAnimationDuration(260, 155));
   }
   $("#economicReason").textContent = "출발지 정산 완료";
   $("#economicAmount").textContent = `현재 현금 ${money(settlement.cash_after)}원`;
@@ -1142,7 +1167,7 @@ function enqueueEconomicAction(action) {
     try {
       const changes = action.cash_changes || [];
       const transfer = changes.some((change) => change.counterparty_player_id) || changes.filter((change) => change.amount_won < 0).length && changes.filter((change) => change.amount_won > 0).length;
-      const minimum = action.action_type === "start_settlement" ? 4000 : changes.length >= 5 ? 1500 : changes.length > 1 ? 350 * changes.length : transfer ? 1000 : 750;
+      const minimum = action.action_type === "start_settlement" ? 12000 : changes.length >= 5 ? 4500 : changes.length > 1 ? 1050 * changes.length : transfer ? 3000 : 2250;
       await runPresentationScene(presentationPhases.ECONOMIC_RESULT, action.action_id, minimum, "경제 결과를 표시하는 중입니다.", () => playEconomicAction(action), { identity, blocking: false });
     }
     finally {
@@ -1153,7 +1178,7 @@ function enqueueEconomicAction(action) {
           .catch((error) => console.warn("Economic animation cursor was not acknowledged", error));
       }
     }
-  }, { identity, blocking: false, timeoutMs: 8000 });
+  }, { identity, blocking: false, timeoutMs: 24000 });
 }
 
 function enqueuePendingEconomicActions(privateData, publicActions = []) {
@@ -2039,6 +2064,7 @@ async function performAction(button, url, body) {
   actionInFlight = true;
   const temporaryActionId = `request-${Date.now()}`;
   requestLockIdentity = normalizeIdentity({ ...currentTurnIdentity(), actionId: temporaryActionId });
+  let actionIdentity = requestLockIdentity;
   presentationMetric(temporaryActionId);
   setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: temporaryActionId, locked: true, reason: "서버 응답을 기다리는 중입니다.", identity: requestLockIdentity, blocking: true });
   renderActionState();
@@ -2046,26 +2072,28 @@ async function performAction(button, url, body) {
   try {
     const result = await postJson(url, body);
     const actionId = result.economic_action?.action_id || temporaryActionId;
+    actionIdentity = result.economic_action ? identityFromEconomicAction(result.economic_action) : normalizeIdentity({ ...actionIdentity, actionId });
     turnPresentationState.actionId = actionId;
     if (result.economic_action) await enqueueEconomicAction(result.economic_action);
     renderedStateVersion = -1;
-    await syncPresentationSnapshot(actionId);
+    await syncPresentationSnapshot(actionId, { identity: actionIdentity });
     await showResultSummary(actionId, {
       title: result.user_message || "행동을 완료했습니다.",
       detail: `현재 현금 ${money(lastPrivate?.player?.cash_won)}원`,
       next: lastPrivate?.next_action_message || "현재 가능한 행동을 확인하세요.",
       holdMs: 600,
-      required: ["bankruptcy_declared", "special_forced_sale", "loan_created"].includes(result.economic_action?.action_type)
+      required: ["bankruptcy_declared", "special_forced_sale", "loan_created"].includes(result.economic_action?.action_type),
+      identity: actionIdentity
     });
-    await completeServerPresentation(actionId);
+    await completeServerPresentation(actionId, { identity: actionIdentity });
     showMessage(result.user_message || result.result_summary || "행동을 완료했습니다.");
   } catch (error) {
     showMessage(error.message || "요청을 처리하지 못했습니다.", true);
   } finally {
     actionInFlight = false;
     requestLockIdentity = null;
-    await syncPresentationSnapshot(turnPresentationState.actionId || temporaryActionId);
-    finishPresentation({ ...currentTurnIdentity(), actionId: turnPresentationState.actionId || temporaryActionId });
+    await syncPresentationSnapshot(turnPresentationState.actionId || temporaryActionId, { identity: actionIdentity });
+    finishPresentation({ ...actionIdentity, actionId: turnPresentationState.actionId || temporaryActionId });
     renderActionState();
   }
 }
@@ -2149,6 +2177,7 @@ async function confirmBuildAction() {
   actionInFlight = true;
   const presentationId = `build-${Date.now()}`;
   requestLockIdentity = normalizeIdentity({ ...currentTurnIdentity(), actionId: presentationId });
+  let buildIdentity = requestLockIdentity;
   let completedActionId = presentationId;
   setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: presentationId, locked: true, reason: "건설 결과를 확인하는 중입니다.", identity: requestLockIdentity, blocking: true });
   $("#confirmBuild").disabled = true;
@@ -2165,17 +2194,19 @@ async function confirmBuildAction() {
       preview_price_won: preview.price_won
     });
     completedActionId = result.economic_action?.action_id || presentationId;
+    buildIdentity = result.economic_action ? identityFromEconomicAction(result.economic_action) : normalizeIdentity({ ...buildIdentity, actionId: completedActionId });
     buildConfirmModal.hidden = true;
     activeBuildPreview = null;
     if (result.economic_action) await enqueueEconomicAction(result.economic_action);
     renderedStateVersion = -1;
-    await syncPresentationSnapshot(completedActionId);
+    await syncPresentationSnapshot(completedActionId, { identity: buildIdentity });
     await showResultSummary(result.economic_action?.action_id || presentationId, {
       title: `${preview.region_name}에 ${preview.building_type_name} 건물을 건설했습니다.`,
       detail: `건설비 ${money(preview.price_won)}원 · 현재 현금 ${money(lastPrivate?.player?.cash_won)}원`,
-      next: lastPrivate?.next_action_message || "현재 가능한 행동을 확인하세요."
+      next: lastPrivate?.next_action_message || "현재 가능한 행동을 확인하세요.",
+      identity: buildIdentity
     });
-    await completeServerPresentation(completedActionId);
+    await completeServerPresentation(completedActionId, { identity: buildIdentity });
     showMessage(`${preview.region_name} ${preview.building_type_name} 건설이 완료되었습니다.`);
   } catch (error) {
     $("#buildConfirmError").textContent = error.message || "건설 요청에 실패했습니다.";
@@ -2186,12 +2217,12 @@ async function confirmBuildAction() {
     requestLockIdentity = null;
     $("#cancelBuildConfirm").disabled = false;
     renderActionState();
-    await syncPresentationSnapshot(completedActionId);
+    await syncPresentationSnapshot(completedActionId, { identity: buildIdentity });
     if (buildConfirmModal.hidden) {
       buildConfirmationOrigin?.focus();
       buildConfirmationOrigin = null;
     }
-    finishPresentation({ ...currentTurnIdentity(), actionId: completedActionId });
+    finishPresentation({ ...buildIdentity, actionId: completedActionId });
     renderActionState();
   }
 }
@@ -2201,6 +2232,7 @@ async function performRoll(button) {
   const clickedAt = performance.now();
   actionInFlight = true;
   requestLockIdentity = normalizeIdentity({ ...currentTurnIdentity(), actionId: `roll-request-${Date.now()}` });
+  let rollIdentity = requestLockIdentity;
   setPresentationPhase(presentationPhases.ACTION_REQUEST, { actionId: null, locked: true, reason: "서버에서 주사위 결과를 확인하는 중입니다.", identity: requestLockIdentity, blocking: true });
   renderActionState();
   showAnimationStage(diceStage);
@@ -2216,12 +2248,12 @@ async function performRoll(button) {
     metric.server_response_ms = Math.round(performance.now() - requestStarted);
     turnPresentationState.actionId = result.action_id;
     observedRollActionId = result.action_id;
-    const rollIdentity = identityFromRoll(result);
+    rollIdentity = identityFromRoll(result);
     await animationController.enqueue("dice", result.action_id, () => playDiceSequence(result, { identity: rollIdentity, blocking: true }), { identity: rollIdentity, blocking: true, timeoutMs: 5000 });
     const pendingEvent = (lastPrivate?.pending_event_occurrences || [])[0];
     if (pendingEvent) {
       queuedOccurrenceIds.add(pendingEvent.occurrence_id);
-      await runPresentationScene(presentationPhases.EVENT_REVEAL, result.action_id, 0, "이벤트를 확인하세요.", () => revealEventOccurrence(pendingEvent));
+      await runPresentationScene(presentationPhases.EVENT_REVEAL, result.action_id, 0, "이벤트를 확인하세요.", () => revealEventOccurrence(pendingEvent), { identity: rollIdentity });
       queuedOccurrenceIds.delete(pendingEvent.occurrence_id);
     }
     if (result.economic_action) {
@@ -2229,9 +2261,9 @@ async function performRoll(button) {
       await enqueueEconomicAction(result.economic_action);
       metric.economic_animation_ms = Math.round(performance.now() - economicStarted);
     }
-    await syncPresentationSnapshot(result.action_id);
-    await showResultSummary(result.action_id, rollResultSummary(result));
-    await completeServerPresentation(result.action_id);
+    await syncPresentationSnapshot(result.action_id, { identity: rollIdentity });
+    await showResultSummary(result.action_id, { ...rollResultSummary(result), identity: rollIdentity });
+    await completeServerPresentation(result.action_id, { identity: rollIdentity });
     showMessage(`주사위 결과 ${result.dice}`);
   } catch (error) {
     hideAnimationOverlay();
@@ -2239,8 +2271,8 @@ async function performRoll(button) {
   } finally {
     actionInFlight = false;
     requestLockIdentity = null;
-    await syncPresentationSnapshot(turnPresentationState.actionId);
-    if (turnPresentationState.actionId) finishPresentation({ ...currentTurnIdentity(), actionId: turnPresentationState.actionId });
+    await syncPresentationSnapshot(turnPresentationState.actionId, { identity: rollIdentity });
+    if (turnPresentationState.actionId) finishPresentation({ ...rollIdentity, actionId: turnPresentationState.actionId });
     renderActionState();
   }
 }

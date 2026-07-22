@@ -9,3 +9,4 @@ instance/
 htmlcov/
 validation_failures/
 validation_results*.json
+.playwright-libs/

@@ -1,11 +1,11 @@
 # TURN_FLOW_MEASUREMENTS
 
-- 작업 전 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647`
-- 작업 후 커밋: `UNCOMMITTED_WORKTREE`
-- 테스트를 실제 실행한 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647` + working tree changes
-- 브라우저 테스트를 실행한 커밋: `ATTEMPTED_SKIPPED_LIBNSPR4_MISSING`
+- 작업 전 커밋: `a37a8be8d546985f598a584d006203d88a2f31f7`
+- 작업 후 상태: `a37a8be8d546985f598a584d006203d88a2f31f7` 위 working tree 수정본
+- 테스트를 실제 실행한 대상: `a37a8be8d546985f598a584d006203d88a2f31f7` 위 working tree 수정본
+- 브라우저 테스트: `REAL_CHROMIUM_100_HUMAN_TURNS_PASSED`
 
-측정 방식: 엔진 단위 시나리오와 테스트 계약을 기준으로 서버 step sequence, 부여 시간, 클릭 수를 계측했다. 실제 브라우저 애니메이션 시간과 콘솔 오류 검증은 `node` 부재와 Playwright Chromium의 `libnspr4.so` 의존성 부재로 수행하지 못했다.
+측정 방식: 엔진 단위 시나리오와 테스트 계약을 기준으로 서버 step sequence, 부여 시간, 클릭 수를 계측했다. 추가로 실제 Chromium에서 1 human + 3 bot 구성으로 사람 주사위 턴 100회를 실행해 서버 주사위 허용과 브라우저 버튼 활성 상태가 어긋나지 않는지 검증했다.
 
 | 시나리오 | step_id 순서 | 부여 시간 | 사용자 클릭 수 | 자동 단계 | 결과 확인 | 총 경과시간 | 서버/화면 최대 차이 |
 | --- | --- | --- | ---: | --- | ---: | --- | --- |
@@ -24,7 +24,7 @@
 | 파산 | 파산 판정 + 인수/부활 단계 | 15초 내외 | 상황 의존 | 파산 처리 | 1 | NOT_BROWSER_MEASURED | NOT_BROWSER_MEASURED |
 | 부활 | `REVIVAL_DECISION` | 15초 | 1 | 없음 | 1 | 입력 기준 최대 15초 | NOT_BROWSER_MEASURED |
 | 거래 제안과 응답 | `MANAGEMENT_DECISION -> TRADE_CONFIGURATION -> TRADE_RESPONSE -> RESULT_CONFIRMATION` | 25초, 30초, 공식 10초 | 2~3 | 상대 응답 대기 | 1 | 입력 기준 55초 + 공식 10초 | NOT_BROWSER_MEASURED |
-| 봇 3명 연속 턴 | 서버 봇 전략 실행 | 사용자 입력 없음 | 0 | 봇 자동 실행 | 중요 결과만 표시 필요 | bot delay 설정 의존 | NOT_BROWSER_MEASURED |
+| 봇 3명 연속 턴 뒤 사람 주사위 | 서버 봇 전략 실행 뒤 `ROLL_DECISION` | 사용자 입력 없음 + 12초 | 1 | 봇 자동 실행 | 중요 결과만 표시 | 100회 사람 턴 실브라우저 통과 | 0건 |
 
 ## 관찰
 
@@ -32,4 +32,4 @@
 - 추가 행동지가 없는 턴은 별도 턴 종료 클릭 없이 서버가 자동 종료한다.
 - 건설은 한 서버 입력 단계 안에서 유형 선택과 최종 확인을 처리한다.
 - 단계 timeout만으로는 `no_action_counts`가 증가하지 않는다.
-- 브라우저 애니메이션 중 선택시간 손실은 Playwright/실기기 환경에서 추가 검증이 필요하다.
+- 실브라우저 100회 사람 주사위 턴에서 `currentRollServerAllowed == true`인데 버튼이 disabled/hidden인 상태, stale blocking task, orphan blocking task, 콘솔 error, 서버 500 응답은 0건이었다.

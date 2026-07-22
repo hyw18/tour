@@ -1,9 +1,9 @@
 # RULE_GAP_REPORT_CURRENT
 
-- 작업 전 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647`
-- 작업 후 커밋: `UNCOMMITTED_WORKTREE`
-- 테스트를 실제 실행한 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647` + working tree changes
-- 브라우저 테스트를 실행한 커밋: `ATTEMPTED_SKIPPED_LIBNSPR4_MISSING`
+- 작업 전 커밋: `a37a8be8d546985f598a584d006203d88a2f31f7`
+- 작업 후 상태: `a37a8be8d546985f598a584d006203d88a2f31f7` 위 working tree 수정본
+- 테스트를 실제 실행한 대상: `a37a8be8d546985f598a584d006203d88a2f31f7` 위 working tree 수정본
+- 브라우저 테스트: `REAL_CHROMIUM_100_HUMAN_TURNS_PASSED`
 
 ## 해결됨
 
@@ -16,6 +16,7 @@
 | timeout 메시지 모호함 | RESOLVED | 단계별 한국어 자동 처리 메시지 |
 | 결과 확인/턴 종료 중복 | RESOLVED | 추가 행동이 없으면 `complete_turn_presentation`과 timeout 처리가 `_finish_turn`으로 바로 다음 플레이어의 `ROLL_DECISION`을 연다 |
 | 오래된 snapshot이 최신 턴 UI 덮어씀 | RESOLVED | player client가 `game_instance_id`, `state_version`, `turn_sequence`, `step_sequence`로 stale snapshot 렌더링을 차단 |
+| 이전/봇 주사위 표시가 현재 사람 턴을 잠금 | RESOLVED | `roll_result`에 `turn_id`, `step_sequence`를 추가하고 클라이언트 queue 수렴 시 stale blocking task 제거. 100턴 Chromium 테스트 통과 |
 
 ## 부분 해결
 

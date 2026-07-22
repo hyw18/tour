@@ -708,6 +708,7 @@ class GameEngine:
         if self.state.turn_has_rolled:
             raise GameRuleError("current player already rolled")
         self._set_turn_step("ROLL_RESOLUTION", "dice_requested", player_id=player.id)
+        roll_step = self.state.turn_step or {}
         dice = self._next_dice()
         self.state.last_dice = dice
         self.state.turn_has_rolled = True
@@ -727,7 +728,9 @@ class GameEngine:
             "passed_start": start_position != 0 and player.position == 0,
             "stopped_at_start": start_position != 0 and player.position == 0,
             "arrival_type": self.data["board"][player.position]["type"],
+            "turn_id": roll_step.get("turn_id"),
             "turn_sequence": self.state.turn_sequence,
+            "step_sequence": roll_step.get("step_sequence"),
         }
         roll_result["arrival_id"] = (
             f"{self.state.game_instance_id}:{self.state.turn_sequence}:"

@@ -1,9 +1,9 @@
 # TURN_STEP_TIMER_AUDIT
 
-- 작업 전 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647`
-- 작업 후 커밋: `UNCOMMITTED_WORKTREE`
-- 테스트를 실제 실행한 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647` + working tree changes
-- 브라우저 테스트를 실행한 커밋: `ATTEMPTED_SKIPPED_LIBNSPR4_MISSING`
+- 작업 전 커밋: `a37a8be8d546985f598a584d006203d88a2f31f7`
+- 작업 후 상태: `a37a8be8d546985f598a584d006203d88a2f31f7` 위 working tree 수정본
+- 테스트를 실제 실행한 대상: `a37a8be8d546985f598a584d006203d88a2f31f7` 위 working tree 수정본
+- 브라우저 테스트: `REAL_CHROMIUM_100_HUMAN_TURNS_PASSED`
 
 ## 결론
 
@@ -46,9 +46,11 @@ last_valid_input_at
 
 ## 검증
 
-- `.venv/bin/python -m pytest -q`: 237 passed, 1 skipped
+- `.venv/bin/python -m pytest -q`: 244 passed
 - `.venv/bin/ruff check .`: passed
 - `.venv/bin/flask --app app routes`: passed
-- `.venv/bin/python -m compileall game tests static`: passed
+- `.venv/bin/python -m compileall app.py game tests`: passed
 - `node --check static/js/*.js`: `node` not installed
-- `.venv/bin/python -m pytest tests/test_player_browser.py -q -rs`: skipped, Chromium dependency `libnspr4.so` missing
+- QuickJS syntax check for `static/js/host.js` and `static/js/player.js`: syntax passed, stopped only at expected browser globals
+- `.venv/bin/python -m pytest tests/test_player_browser.py::test_browser_one_hundred_human_turns_have_no_stale_roll_lock -q -rs`: 1 passed in 135.58s
+- `.venv/bin/python -m pytest tests/test_player_browser.py::test_landscape_player_ui_purchase_build_sell_and_refresh -q -rs`: 1 passed in 42.08s

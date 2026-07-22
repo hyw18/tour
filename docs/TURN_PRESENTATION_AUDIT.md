@@ -1,9 +1,9 @@
 # TURN_PRESENTATION_AUDIT
 
-- 작업 전 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647`
-- 작업 후 커밋: `UNCOMMITTED_WORKTREE`
-- 테스트를 실제 실행한 커밋: `d7dc9d26deebd464fda0f44c78f77b0c7b9f2647` + working tree changes
-- 브라우저 테스트를 실행한 커밋: `ATTEMPTED_SKIPPED_LIBNSPR4_MISSING`
+- 작업 전 커밋: `a37a8be8d546985f598a584d006203d88a2f31f7`
+- 작업 후 상태: `a37a8be8d546985f598a584d006203d88a2f31f7` 위 working tree 수정본
+- 테스트를 실제 실행한 대상: `a37a8be8d546985f598a584d006203d88a2f31f7` 위 working tree 수정본
+- 브라우저 테스트: `REAL_CHROMIUM_100_HUMAN_TURNS_PASSED`
 
 ## 서버 단계와 화면 장면
 
@@ -29,6 +29,12 @@
 ## 최신 스냅샷 보호
 
 플레이어 클라이언트는 `game_instance_id`, `state_version`, `turn_sequence`, `step_sequence`를 비교해 오래된 snapshot을 렌더링하지 않는다. 이전 턴 또는 이전 단계 응답이 늦게 도착해도 최신 턴의 주사위 버튼 상태를 덮어쓰지 않도록 보호한다.
+
+주사위 결과도 `turn_id`, `turn_sequence`, `step_sequence`를 포함한다. 따라서 브라우저가 뒤늦게 수신한 봇 또는 이전 턴 주사위 표현은 현재 사람 턴의 blocking presentation으로 정규화되지 않는다. 본인 `ROLL_DECISION`에서 서버가 주사위를 허용하면 클라이언트는 stale request, stale presentation, stale animation task, stale queue 항목을 수렴 정리한다.
+
+## 브라우저 검증
+
+`tests/test_player_browser.py::test_browser_one_hundred_human_turns_have_no_stale_roll_lock`는 실제 Chromium에서 사람 1명과 봇 3명으로 100번의 사람 주사위 턴을 진행한다. 각 사람 턴마다 `currentRollServerAllowed == true`, `#rollDice:not([disabled])`, stale blocking task 0건을 확인하고, 마지막에는 orphan blocking task, 콘솔 error, 서버 500 응답이 0건인지 검증한다.
 
 ## Timeout 안내
 

@@ -20,7 +20,7 @@ def test_turn_presentation_has_explicit_ordered_scenes_and_state_lock():
         assert f'{phase}: "{phase}"' in script
     assert "turnPresentationState" in script
     assert "presentationLocked = hasBlockingPresentationForCurrentTurn()" in script
-    assert "await syncPresentationSnapshot(result.action_id)" in script
+    assert "await syncPresentationSnapshot(result.action_id, { identity: rollIdentity })" in script
 
 
 def test_speed_modes_and_scene_minimums_are_not_one_global_delay():
@@ -31,7 +31,8 @@ def test_speed_modes_and_scene_minimums_are_not_one_global_delay():
     assert "minimal: 0" in script
     assert "cell?.type === \"start\" ? 1200" in script
     assert "hasDecision ? 900 : 700" in script
-    assert "action.action_type === \"start_settlement\" ? 4000" in script
+    assert "ECONOMIC_PRESENTATION_TIME_SCALE = 3" in script
+    assert "action.action_type === \"start_settlement\" ? 12000" in script
 
 
 def test_result_summary_and_development_timeline_are_exposed():
@@ -74,7 +75,7 @@ def test_economic_animation_is_non_blocking_and_identity_scoped():
     assert "const animationTasks = new Map()" in script
     assert "function identityFromEconomicAction(action = {})" in script
     assert 'animationController.enqueue("economic", action.action_id' in script
-    assert "{ identity, blocking: false, timeoutMs: 8000 }" in script
+    assert "{ identity, blocking: false, timeoutMs: 24000 }" in script
     assert "runPresentationScene(presentationPhases.ECONOMIC_RESULT" in script
     assert "{ identity, blocking: false }" in script
 
